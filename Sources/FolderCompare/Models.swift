@@ -38,6 +38,25 @@ enum DiffStatus: String, CaseIterable, Identifiable, Sendable {
             "混合状态"
         }
     }
+
+    var compactDisplayName: String {
+        switch self {
+        case .identical:
+            "一致"
+        case .samePathDifferentSize:
+            "同路径异大小"
+        case .sameSizeDifferentPath:
+            "同大小异路径"
+        case .leftOnly:
+            "仅左侧"
+        case .rightOnly:
+            "仅右侧"
+        case .folder:
+            "文件夹"
+        case .mixed:
+            "混合"
+        }
+    }
 }
 
 struct PathPair: Identifiable, Hashable, Sendable {

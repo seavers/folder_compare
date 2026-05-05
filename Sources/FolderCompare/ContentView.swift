@@ -307,9 +307,6 @@ private struct TreeResultView: View {
             .clipShape(RoundedRectangle(cornerRadius: 14))
         }
         .id(treeIdentity)
-        .onAppear {
-            expandedNodes = Set(result.treeRoots.directoryPathsRecursively())
-        }
     }
 }
 
@@ -322,19 +319,19 @@ private struct TreeHeaderRowView: View {
 
             Text("状态")
                 .font(AppTypography.smallStrong)
-                .frame(width: 112, alignment: .leading)
+                .frame(width: 104, alignment: .leading)
 
             Text("左侧")
                 .font(AppTypography.smallStrong)
-                .frame(width: 92, alignment: .trailing)
+                .frame(width: 88, alignment: .trailing)
 
             Text("右侧")
                 .font(AppTypography.smallStrong)
-                .frame(width: 92, alignment: .trailing)
+                .frame(width: 88, alignment: .trailing)
 
             Text("操作")
                 .font(AppTypography.smallStrong)
-                .frame(width: 120, alignment: .leading)
+                .frame(width: 92, alignment: .leading)
         }
         .foregroundStyle(.secondary)
         .padding(.horizontal, 12)
@@ -369,10 +366,15 @@ private struct TreeNodeBranchView: View {
             return
         }
 
-        if isExpanded {
-            expandedNodes.remove(node.fullPath)
-        } else {
-            expandedNodes.insert(node.fullPath)
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+
+        withTransaction(transaction) {
+            if isExpanded {
+                expandedNodes.remove(node.fullPath)
+            } else {
+                expandedNodes.insert(node.fullPath)
+            }
         }
     }
 }
@@ -415,20 +417,16 @@ private struct TreeRowView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             StatusBadge(status: node.status)
-                .frame(width: 112, alignment: .leading)
+                .frame(width: 104, alignment: .leading)
 
-            Text(SizeFormatter.string(from: node.leftSize))
-                .font(AppTypography.mono)
-                .foregroundStyle(.secondary)
-                .frame(width: 92, alignment: .trailing)
+            SizeValueView(value: node.leftSize)
+                .frame(width: 88, alignment: .trailing)
 
-            Text(SizeFormatter.string(from: node.rightSize))
-                .font(AppTypography.mono)
-                .foregroundStyle(.secondary)
-                .frame(width: 92, alignment: .trailing)
+            SizeValueView(value: node.rightSize)
+                .frame(width: 88, alignment: .trailing)
 
             RowActionView(node: node, onDeleteRequest: onDeleteRequest, onCopyRequest: onCopyRequest)
-                .frame(width: 120, alignment: .leading)
+                .frame(width: 92, alignment: .leading)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -458,7 +456,8 @@ private struct RowActionView: View {
             .buttonStyle(.borderless)
             .font(AppTypography.small)
         case .none:
-            EmptyView()
+            Color.clear
+                .frame(width: 1, height: 18)
         }
     }
 
@@ -505,6 +504,24 @@ private struct DepthGuidesView: View {
         }
         .frame(width: CGFloat(depth) * 10, alignment: .leading)
         .padding(.trailing, depth > 0 ? 10 : 0)
+    }
+}
+
+private struct SizeValueView: View {
+    let value: UInt64?
+
+    var body: some View {
+        Group {
+            if let value {
+                Text(SizeFormatter.string(from: value))
+                    .font(AppTypography.mono)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Text("")
+                    .font(AppTypography.mono)
+            }
+        }
     }
 }
 
@@ -718,13 +735,15 @@ private struct StatusBadge: View {
     let status: DiffStatus
 
     var body: some View {
-        Text(status.displayName)
+        Text(status.compactDisplayName)
             .font(AppTypography.small)
             .foregroundStyle(status.color)
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
             .background(status.color.opacity(0.11))
             .clipShape(Capsule())
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
     }
 }
 
@@ -773,15 +792,6 @@ private extension DiffStatus {
             Color(nsColor: .systemYellow)
         case .mixed:
             .secondary
-        }
-    }
-}
-
-private extension [FileTreeNode] {
-    func directoryPathsRecursively() -> [String] {
-        flatMap { node in
-            let childPaths = node.children.directoryPathsRecursively()
-            return node.isDirectory ? [node.fullPath] + childPaths : childPaths
         }
     }
 }

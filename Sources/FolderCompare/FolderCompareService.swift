@@ -2,7 +2,7 @@ import Foundation
 
 struct FolderCompareService {
     private let fileManager = FileManager.default
-    private let resourceKeys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .isDirectoryKey, .creationDateKey, .contentModificationDateKey]
+    private let resourceKeys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
 
     func compare(leftFolder: URL, rightFolder: URL) throws -> CompareResult {
         let leftSnapshot = try snapshot(for: leftFolder)
