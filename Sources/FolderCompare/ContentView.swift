@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
@@ -382,21 +383,9 @@ private struct DirectorySidebarView: View {
                 .font(AppTypography.smallStrong)
                 .padding(.horizontal, 10)
 
-            Button {
+            SidebarRootRowView(isSelected: selectedDirectoryPath.isEmpty) {
                 selectedDirectoryPath = ""
-            } label: {
-                HStack {
-                    Image(systemName: "tray.full")
-                    Text("根目录")
-                }
-                .font(AppTypography.smallStrong)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
             }
-            .buttonStyle(.plain)
-            .background(selectedDirectoryPath.isEmpty ? Color.accentColor.opacity(0.12) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
@@ -419,6 +408,8 @@ private struct DirectoryTreeRowView: View {
     let depth: Int
     @Binding var selectedDirectoryPath: String
     @Binding var expandedNodes: Set<String>
+    @State private var isHovered = false
+    @State private var isArrowHovered = false
 
     private var isExpanded: Bool {
         expandedNodes.contains(node.path)
@@ -436,32 +427,41 @@ private struct DirectoryTreeRowView: View {
                 Button(action: toggleExpanded) {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 14, height: 14)
+                        .foregroundStyle(isArrowHovered ? .primary : .secondary)
+                        .frame(width: 28, height: 28)
+                        .background(isArrowHovered ? Color.primary.opacity(0.08) : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
-
-                Button {
-                    selectedDirectoryPath = node.path
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "folder.fill")
-                            .foregroundStyle(Color(nsColor: .systemYellow))
-
-                        Text(node.name)
-                            .font(AppTypography.nodeName)
-
-                        Spacer(minLength: 4)
-
-                        StatusBadge(status: node.status)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 7)
+                .onHover { hovering in
+                    isArrowHovered = hovering
+                    updateCursor(isHovering: hovering)
                 }
-                .buttonStyle(.plain)
-                .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+
+                HStack(spacing: 6) {
+                    Image(systemName: "folder.fill")
+                        .foregroundStyle(Color(nsColor: .systemYellow))
+
+                    Text(node.name)
+                        .font(AppTypography.nodeName)
+
+                    Spacer(minLength: 4)
+
+                    StatusBadge(status: node.status)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .contentShape(Rectangle())
+                .background(rowBackgroundColor)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
+                .onTapGesture {
+                    selectedDirectoryPath = node.path
+                }
+                .onHover { hovering in
+                    isHovered = hovering
+                    updateCursor(isHovering: hovering)
+                }
             }
 
             if isExpanded {
@@ -470,6 +470,18 @@ private struct DirectoryTreeRowView: View {
                 }
             }
         }
+    }
+
+    private var rowBackgroundColor: Color {
+        if isSelected {
+            return Color.accentColor.opacity(0.14)
+        }
+
+        if isHovered {
+            return Color.primary.opacity(0.06)
+        }
+
+        return .clear
     }
 
     private func toggleExpanded() {
@@ -482,6 +494,14 @@ private struct DirectoryTreeRowView: View {
             } else {
                 expandedNodes.insert(node.path)
             }
+        }
+    }
+
+    private func updateCursor(isHovering: Bool) {
+        if isHovering {
+            NSCursor.pointingHand.push()
+        } else {
+            NSCursor.pop()
         }
     }
 }
@@ -600,27 +620,21 @@ private struct DetailActionView: View {
     var body: some View {
         switch action {
         case .openDirectory:
-            Button("进入") {
+            HoverActionButton(title: "进入") {
                 onOpenDirectory(node.path)
             }
-            .buttonStyle(.borderless)
-            .font(AppTypography.small)
         case let .delete(file):
-            Button("删除左侧") {
+            HoverActionButton(title: "删除左侧", role: .destructive) {
                 onDeleteRequest(file)
             }
-            .buttonStyle(.borderless)
-            .font(AppTypography.small)
-            .foregroundStyle(.red)
         case let .copy(file):
-            Button("拷到左侧") {
+            HoverActionButton(title: "拷到左侧") {
                 onCopyRequest(file)
             }
-            .buttonStyle(.borderless)
-            .font(AppTypography.small)
         case .none:
-            Color.clear
-                .frame(width: 1, height: 18)
+            Text("无操作")
+                .font(AppTypography.small)
+                .foregroundStyle(.tertiary)
         }
     }
 
@@ -670,6 +684,92 @@ private struct SizeValueView: View {
                     .font(AppTypography.mono)
             }
         }
+    }
+}
+
+private struct SidebarRootRowView: View {
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack {
+            Image(systemName: "tray.full")
+            Text("根目录")
+        }
+        .font(AppTypography.smallStrong)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .background(backgroundColor)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .onTapGesture(perform: action)
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+    }
+
+    private var backgroundColor: Color {
+        if isSelected {
+            return Color.accentColor.opacity(0.12)
+        }
+
+        if isHovered {
+            return Color.primary.opacity(0.06)
+        }
+
+        return .clear
+    }
+}
+
+private struct HoverActionButton: View {
+    let title: String
+    var role: ButtonRole?
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(role: role, action: action) {
+            Text(title)
+                .font(AppTypography.small)
+                .foregroundStyle(foregroundColor)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(backgroundColor)
+                .clipShape(Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+    }
+
+    private var foregroundColor: Color {
+        if role == .destructive {
+            return isHovered ? Color.red : Color.red.opacity(0.92)
+        }
+
+        return isHovered ? Color.accentColor : .secondary
+    }
+
+    private var backgroundColor: Color {
+        if role == .destructive {
+            return isHovered ? Color.red.opacity(0.12) : Color.clear
+        }
+
+        return isHovered ? Color.accentColor.opacity(0.12) : Color.clear
     }
 }
 
