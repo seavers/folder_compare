@@ -24,6 +24,7 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 # 3. 拷贝可执行文件与 Info.plist，生成可双击启动的应用包。
 cp "$EXECUTABLE_PATH" "$MACOS_DIR/$APP_NAME"
 cp "$ROOT_DIR/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
+cp "$ROOT_DIR/Resources/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 chmod +x "$MACOS_DIR/$APP_NAME"
 
 echo "应用已生成: $APP_DIR"
