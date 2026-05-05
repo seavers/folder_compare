@@ -4,12 +4,19 @@ import Foundation
 
 @MainActor
 final class FolderCompareViewModel: ObservableObject {
+    private static let historyStorageKey = "FolderCompare.history"
+
     @Published var leftFolderPath = ""
     @Published var rightFolderPath = ""
     @Published var compareResult: CompareResult?
     @Published var isComparing = false
     @Published var errorMessage: String?
     @Published var activeOperationMessage: String?
+    @Published var historyItems: [CompareHistoryItem] = []
+
+    init() {
+        historyItems = loadHistoryItems()
+    }
 
     func chooseFolder(for side: CompareSide) {
         let panel = NSOpenPanel()
@@ -50,6 +57,7 @@ final class FolderCompareViewModel: ObservableObject {
 
                 // 2. 回到主线程更新界面状态，让统计卡片和结果视图同时刷新。
                 compareResult = result
+                saveHistory(leftPath: leftPath, rightPath: rightPath)
                 isComparing = false
             } catch {
                 errorMessage = error.localizedDescription
@@ -123,10 +131,44 @@ final class FolderCompareViewModel: ObservableObject {
         }
     }
 
+    func compare(using historyItem: CompareHistoryItem) {
+        leftFolderPath = historyItem.leftPath
+        rightFolderPath = historyItem.rightPath
+        compareFolders()
+    }
+
     private func compareInBackground(leftPath: String, rightPath: String) async throws -> CompareResult {
         try await Task.detached(priority: .userInitiated) {
             let service = FolderCompareService()
             return try service.compare(leftFolder: URL(fileURLWithPath: leftPath), rightFolder: URL(fileURLWithPath: rightPath))
         }.value
+    }
+
+    private func saveHistory(leftPath: String, rightPath: String) {
+        let normalizedLeft = leftPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedRight = rightPath.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !normalizedLeft.isEmpty, !normalizedRight.isEmpty else {
+            return
+        }
+
+        var updatedItems = historyItems.filter { !($0.leftPath == normalizedLeft && $0.rightPath == normalizedRight) }
+        updatedItems.insert(CompareHistoryItem(leftPath: normalizedLeft, rightPath: normalizedRight), at: 0)
+        historyItems = Array(updatedItems.prefix(20))
+
+        guard let data = try? JSONEncoder().encode(historyItems) else {
+            return
+        }
+
+        UserDefaults.standard.set(data, forKey: Self.historyStorageKey)
+    }
+
+    private func loadHistoryItems() -> [CompareHistoryItem] {
+        guard let data = UserDefaults.standard.data(forKey: Self.historyStorageKey),
+              let items = try? JSONDecoder().decode([CompareHistoryItem].self, from: data) else {
+            return []
+        }
+
+        return items.sorted { $0.comparedAt > $1.comparedAt }
     }
 }

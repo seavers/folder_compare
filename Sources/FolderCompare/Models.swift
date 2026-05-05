@@ -142,3 +142,17 @@ struct FolderSnapshot: Sendable {
     let rootPath: String
     let filesByPath: [String: FileRecord]
 }
+
+struct CompareHistoryItem: Identifiable, Hashable, Codable, Sendable {
+    let id: UUID
+    let leftPath: String
+    let rightPath: String
+    let comparedAt: Date
+
+    init(id: UUID = UUID(), leftPath: String, rightPath: String, comparedAt: Date = Date()) {
+        self.id = id
+        self.leftPath = leftPath
+        self.rightPath = rightPath
+        self.comparedAt = comparedAt
+    }
+}

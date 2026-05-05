@@ -40,6 +40,7 @@ struct ContentView: View {
 
 private struct CompactToolbarView: View {
     @ObservedObject var viewModel: FolderCompareViewModel
+    @State private var isHistoryPresented = false
 
     var body: some View {
         VStack(spacing: 10) {
@@ -80,11 +81,22 @@ private struct CompactToolbarView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(viewModel.isComparing)
+
+                Button("历史记录") {
+                    isHistoryPresented = true
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .font(AppTypography.smallStrong)
+                .disabled(viewModel.historyItems.isEmpty)
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .panelSurface()
+        .sheet(isPresented: $isHistoryPresented) {
+            HistorySheetView(viewModel: viewModel)
+        }
     }
 }
 
@@ -206,7 +218,7 @@ private struct ResultWorkspaceView: View {
                 if let result = viewModel.compareResult {
                     switch viewMode {
                     case .tree:
-                        TreeResultView(result: result, onDeleteRequest: { deleteCandidate = $0 }, onCopyRequest: viewModel.copyRightOnlyFileToLeft)
+                        TreeSplitResultView(result: result, onDeleteRequest: { deleteCandidate = $0 }, onCopyRequest: viewModel.copyRightOnlyFileToLeft)
                     case .flat:
                         FlatResultView(result: result, onDeleteRequest: { deleteCandidate = $0 }, onCopyRequest: viewModel.copyRightOnlyFileToLeft)
                     }
@@ -274,11 +286,12 @@ private struct EmptyWorkspaceView: View {
     }
 }
 
-private struct TreeResultView: View {
+private struct TreeSplitResultView: View {
     let result: CompareResult
     let onDeleteRequest: (FileRecord) -> Void
     let onCopyRequest: (FileRecord) -> Void
     @State private var expandedNodes: Set<String> = []
+    @State private var selectedDirectoryPath = ""
 
     private var treeIdentity: String {
         [
@@ -292,118 +305,261 @@ private struct TreeResultView: View {
     }
 
     var body: some View {
-        VStack(spacing: 8) {
-            TreeHeaderRowView()
+        HSplitView {
+            DirectorySidebarView(directoryRoots: directoryRoots, selectedDirectoryPath: $selectedDirectoryPath, expandedNodes: $expandedNodes)
+                .frame(minWidth: 220, idealWidth: 260, maxWidth: 320)
 
-            ScrollView {
-                LazyVStack(spacing: 6) {
-                    ForEach(result.treeRoots) { node in
-                        TreeNodeBranchView(node: node, depth: 0, expandedNodes: $expandedNodes, onDeleteRequest: onDeleteRequest, onCopyRequest: onCopyRequest)
-                    }
-                }
-                .padding(8)
-            }
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.38))
-            .clipShape(RoundedRectangle(cornerRadius: 14))
+            DirectoryDetailView(
+                directoryPath: selectedDirectoryPath,
+                nodes: currentNodes,
+                onDeleteRequest: onDeleteRequest,
+                onCopyRequest: onCopyRequest,
+                onOpenDirectory: openDirectory
+            )
+            .frame(minWidth: 540)
         }
         .id(treeIdentity)
     }
+
+    private var directoryRoots: [FileTreeNode] {
+        result.treeRoots.filter(\.isDirectory)
+    }
+
+    private var currentNodes: [FileTreeNode] {
+        if selectedDirectoryPath.isEmpty {
+            return result.treeRoots
+        }
+
+        return findDirectoryNode(path: selectedDirectoryPath, in: result.treeRoots)?.children ?? []
+    }
+
+    private func findDirectoryNode(path: String, in nodes: [FileTreeNode]) -> FileTreeNode? {
+        for node in nodes where node.isDirectory {
+            if node.path == path {
+                return node
+            }
+
+            if let matched = findDirectoryNode(path: path, in: node.children) {
+                return matched
+            }
+        }
+
+        return nil
+    }
+
+    private func openDirectory(_ path: String) {
+        guard !path.isEmpty else {
+            selectedDirectoryPath = ""
+            return
+        }
+
+        selectedDirectoryPath = path
+        expandAncestors(for: path)
+    }
+
+    private func expandAncestors(for path: String) {
+        let components = path.split(separator: "/").map(String.init)
+        guard components.count > 1 else {
+            return
+        }
+
+        var current = ""
+        for component in components.dropLast() {
+            current = current.isEmpty ? component : current + "/" + component
+            expandedNodes.insert(current)
+        }
+    }
 }
 
-private struct TreeHeaderRowView: View {
+private struct DirectorySidebarView: View {
+    let directoryRoots: [FileTreeNode]
+    @Binding var selectedDirectoryPath: String
+    @Binding var expandedNodes: Set<String>
+
     var body: some View {
-        HStack(spacing: 12) {
-            Text("名称")
+        VStack(alignment: .leading, spacing: 8) {
+            Text("目录树")
+                .font(AppTypography.smallStrong)
+                .padding(.horizontal, 10)
+
+            Button {
+                selectedDirectoryPath = ""
+            } label: {
+                HStack {
+                    Image(systemName: "tray.full")
+                    Text("根目录")
+                }
                 .font(AppTypography.smallStrong)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
+            .background(selectedDirectoryPath.isEmpty ? Color.accentColor.opacity(0.12) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
 
-            Text("状态")
-                .font(AppTypography.smallStrong)
-                .frame(width: 104, alignment: .leading)
-
-            Text("左侧")
-                .font(AppTypography.smallStrong)
-                .frame(width: 88, alignment: .trailing)
-
-            Text("右侧")
-                .font(AppTypography.smallStrong)
-                .frame(width: 88, alignment: .trailing)
-
-            Text("操作")
-                .font(AppTypography.smallStrong)
-                .frame(width: 92, alignment: .leading)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    ForEach(directoryRoots) { node in
+                        DirectoryTreeRowView(node: node, depth: 0, selectedDirectoryPath: $selectedDirectoryPath, expandedNodes: $expandedNodes)
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.bottom, 8)
+            }
         }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 12)
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.38))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
     }
 }
 
-private struct TreeNodeBranchView: View {
+private struct DirectoryTreeRowView: View {
     let node: FileTreeNode
     let depth: Int
+    @Binding var selectedDirectoryPath: String
     @Binding var expandedNodes: Set<String>
-    let onDeleteRequest: (FileRecord) -> Void
-    let onCopyRequest: (FileRecord) -> Void
 
     private var isExpanded: Bool {
-        expandedNodes.contains(node.fullPath)
+        expandedNodes.contains(node.path)
+    }
+
+    private var isSelected: Bool {
+        selectedDirectoryPath == node.path
     }
 
     var body: some View {
-        VStack(spacing: 6) {
-            TreeRowView(node: node, depth: depth, isExpanded: isExpanded, onToggle: toggleExpanded, onDeleteRequest: onDeleteRequest, onCopyRequest: onCopyRequest)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Color.clear.frame(width: CGFloat(depth) * 12)
 
-            if node.isDirectory && isExpanded {
-                ForEach(node.children) { child in
-                    TreeNodeBranchView(node: child, depth: depth + 1, expandedNodes: $expandedNodes, onDeleteRequest: onDeleteRequest, onCopyRequest: onCopyRequest)
+                Button(action: toggleExpanded) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14, height: 14)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    selectedDirectoryPath = node.path
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "folder.fill")
+                            .foregroundStyle(Color(nsColor: .systemYellow))
+
+                        Text(node.name)
+                            .font(AppTypography.nodeName)
+
+                        Spacer(minLength: 4)
+
+                        StatusBadge(status: node.status)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 7)
+                }
+                .buttonStyle(.plain)
+                .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+
+            if isExpanded {
+                ForEach(node.children.filter(\.isDirectory)) { child in
+                    DirectoryTreeRowView(node: child, depth: depth + 1, selectedDirectoryPath: $selectedDirectoryPath, expandedNodes: $expandedNodes)
                 }
             }
         }
     }
 
     private func toggleExpanded() {
-        guard node.isDirectory else {
-            return
-        }
-
         var transaction = Transaction()
         transaction.disablesAnimations = true
 
         withTransaction(transaction) {
             if isExpanded {
-                expandedNodes.remove(node.fullPath)
+                expandedNodes.remove(node.path)
             } else {
-                expandedNodes.insert(node.fullPath)
+                expandedNodes.insert(node.path)
             }
         }
     }
 }
 
-private struct TreeRowView: View {
-    let node: FileTreeNode
-    let depth: Int
-    let isExpanded: Bool
-    let onToggle: () -> Void
+private struct DirectoryDetailView: View {
+    let directoryPath: String
+    let nodes: [FileTreeNode]
     let onDeleteRequest: (FileRecord) -> Void
     let onCopyRequest: (FileRecord) -> Void
+    let onOpenDirectory: (String) -> Void
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Text(detailTitle)
+                    .font(AppTypography.smallStrong)
+
+                Spacer(minLength: 12)
+
+                Text("\(nodes.count) 项")
+                    .font(AppTypography.small)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 12) {
+                Text("名称")
+                    .font(AppTypography.smallStrong)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Text("状态")
+                    .font(AppTypography.smallStrong)
+                    .frame(width: 104, alignment: .leading)
+
+                Text("左侧")
+                    .font(AppTypography.smallStrong)
+                    .frame(width: 88, alignment: .trailing)
+
+                Text("右侧")
+                    .font(AppTypography.smallStrong)
+                    .frame(width: 88, alignment: .trailing)
+
+                Text("操作")
+                    .font(AppTypography.smallStrong)
+                    .frame(width: 92, alignment: .leading)
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    ForEach(nodes) { node in
+                        DetailListRowView(node: node, onDeleteRequest: onDeleteRequest, onCopyRequest: onCopyRequest, onOpenDirectory: onOpenDirectory)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.38))
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.20))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var detailTitle: String {
+        directoryPath.isEmpty ? "根目录文件列表" : directoryPath
+    }
+}
+
+private struct DetailListRowView: View {
+    let node: FileTreeNode
+    let onDeleteRequest: (FileRecord) -> Void
+    let onCopyRequest: (FileRecord) -> Void
+    let onOpenDirectory: (String) -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            HStack(spacing: 0) {
-                DepthGuidesView(depth: depth)
-
-                if node.isDirectory {
-                    Button(action: onToggle) {
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 16, height: 16)
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    Color.clear.frame(width: 16, height: 16)
-                }
-
+            HStack(spacing: 6) {
                 Image(systemName: node.isDirectory ? "folder.fill" : "doc")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(node.isDirectory ? Color(nsColor: .systemYellow) : .secondary)
@@ -425,7 +581,7 @@ private struct TreeRowView: View {
             SizeValueView(value: node.rightSize)
                 .frame(width: 88, alignment: .trailing)
 
-            RowActionView(node: node, onDeleteRequest: onDeleteRequest, onCopyRequest: onCopyRequest)
+            DetailActionView(node: node, onDeleteRequest: onDeleteRequest, onCopyRequest: onCopyRequest, onOpenDirectory: onOpenDirectory)
                 .frame(width: 92, alignment: .leading)
         }
         .padding(.horizontal, 12)
@@ -435,13 +591,20 @@ private struct TreeRowView: View {
     }
 }
 
-private struct RowActionView: View {
+private struct DetailActionView: View {
     let node: FileTreeNode
     let onDeleteRequest: (FileRecord) -> Void
     let onCopyRequest: (FileRecord) -> Void
+    let onOpenDirectory: (String) -> Void
 
     var body: some View {
         switch action {
+        case .openDirectory:
+            Button("进入") {
+                onOpenDirectory(node.path)
+            }
+            .buttonStyle(.borderless)
+            .font(AppTypography.small)
         case let .delete(file):
             Button("删除左侧") {
                 onDeleteRequest(file)
@@ -461,9 +624,9 @@ private struct RowActionView: View {
         }
     }
 
-    private var action: RowAction {
-        guard !node.isDirectory else {
-            return .none
+    private var action: DetailAction {
+        if node.isDirectory {
+            return .openDirectory
         }
 
         switch node.status {
@@ -485,26 +648,11 @@ private struct RowActionView: View {
     }
 }
 
-private enum RowAction {
+private enum DetailAction {
+    case openDirectory
     case delete(FileRecord)
     case copy(FileRecord)
     case none
-}
-
-private struct DepthGuidesView: View {
-    let depth: Int
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ForEach(0..<depth, id: \.self) { _ in
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(Color.secondary.opacity(0.24))
-                    .frame(width: 2, height: 18)
-            }
-        }
-        .frame(width: CGFloat(depth) * 10, alignment: .leading)
-        .padding(.trailing, depth > 0 ? 10 : 0)
-    }
 }
 
 private struct SizeValueView: View {
@@ -728,6 +876,62 @@ private struct EmptySectionView: View {
                     .font(AppTypography.small)
                     .foregroundStyle(.secondary)
             }
+    }
+}
+
+private struct HistorySheetView: View {
+    @ObservedObject var viewModel: FolderCompareViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("历史记录")
+                .font(AppTypography.section)
+
+            if viewModel.historyItems.isEmpty {
+                Text("暂无历史记录")
+                    .font(AppTypography.small)
+                    .foregroundStyle(.secondary)
+            } else {
+                List(viewModel.historyItems) { item in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.leftPath)
+                                .font(AppTypography.smallStrong)
+                                .lineLimit(1)
+
+                            Text(item.rightPath)
+                                .font(AppTypography.small)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+
+                            Text(historyDateFormatter.string(from: item.comparedAt))
+                                .font(AppTypography.small)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer(minLength: 12)
+
+                        Button("重新对比") {
+                            viewModel.compare(using: item)
+                            dismiss()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                    .padding(.vertical, 4)
+                }
+                .listStyle(.inset)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 720, minHeight: 360)
+    }
+
+    private var historyDateFormatter: DateFormatter {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter
     }
 }
 
