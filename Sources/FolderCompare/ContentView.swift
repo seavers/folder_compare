@@ -244,7 +244,9 @@ private struct ResultWorkspaceView: View {
             }
 
             Group {
-                if let result = viewModel.compareResult {
+                if viewModel.isComparing, let progress = viewModel.compareProgress {
+                    CompareProgressWorkspaceView(progress: progress)
+                } else if let result = viewModel.compareResult {
                     switch viewMode {
                     case .tree:
                         TreeSplitResultView(
@@ -294,6 +296,107 @@ private struct ResultWorkspaceView: View {
         }
 
         return "左 \(result.summary.leftCount) / 右 \(result.summary.rightCount)"
+    }
+}
+
+private struct CompareProgressWorkspaceView: View {
+    let progress: CompareProgress
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+
+                Text(progress.phase.displayName)
+                    .font(AppTypography.section)
+            }
+
+            Group {
+                if let fraction = progress.fractionCompleted {
+                    ProgressView(value: fraction)
+                        .tint(.accentColor)
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .tint(.accentColor)
+                }
+            }
+
+            HStack(spacing: 10) {
+                ProgressMetricCard(title: "左侧已发现", value: "\(progress.leftDiscoveredCount)", tint: .blue)
+                ProgressMetricCard(title: "右侧已发现", value: "\(progress.rightDiscoveredCount)", tint: .indigo)
+                ProgressMetricCard(title: progress.totalCount == nil ? "当前阶段进度" : "已处理", value: processedText, tint: .green)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("当前文件")
+                    .font(AppTypography.smallStrong)
+                    .foregroundStyle(.secondary)
+
+                Text(progress.currentPath ?? placeholderText)
+                    .font(AppTypography.mono)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(18)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.30))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var processedText: String {
+        if let totalCount = progress.totalCount {
+            return "\(progress.processedCount) / \(totalCount)"
+        }
+
+        return "\(progress.processedCount)"
+    }
+
+    private var placeholderText: String {
+        switch progress.phase {
+        case .preparing:
+            "正在准备扫描目录..."
+        case .scanningLeft:
+            "正在扫描左侧目录..."
+        case .scanningRight:
+            "正在扫描右侧目录..."
+        case .matchingPaths:
+            "正在按路径比对..."
+        case .groupingSameSize:
+            "正在处理同大小异路径文件..."
+        case .buildingIndex:
+            "正在生成结果索引..."
+        }
+    }
+}
+
+private struct ProgressMetricCard: View {
+    let title: String
+    let value: String
+    let tint: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(AppTypography.small)
+                .foregroundStyle(.secondary)
+
+            Text(value)
+                .font(AppTypography.section)
+                .foregroundStyle(tint)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(tint.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }
 

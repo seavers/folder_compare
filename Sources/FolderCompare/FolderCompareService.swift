@@ -4,9 +4,11 @@ struct FolderCompareService {
     private let fileManager = FileManager.default
     private let resourceKeys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
 
-    func compare(leftFolder: URL, rightFolder: URL) throws -> CompareResult {
-        let leftSnapshot = try snapshot(for: leftFolder)
-        let rightSnapshot = try snapshot(for: rightFolder)
+    func compare(leftFolder: URL, rightFolder: URL, progress: @escaping @Sendable (CompareProgress) -> Void = { _ in }) throws -> CompareResult {
+        progress(CompareProgress(phase: .preparing, currentPath: nil, leftDiscoveredCount: 0, rightDiscoveredCount: 0, processedCount: 0, totalCount: nil))
+
+        let leftSnapshot = try snapshot(for: leftFolder, side: .left, otherSideCount: 0, progress: progress)
+        let rightSnapshot = try snapshot(for: rightFolder, side: .right, otherSideCount: leftSnapshot.filesByPath.count, progress: progress)
 
         let leftPaths = Set(leftSnapshot.filesByPath.keys)
         let rightPaths = Set(rightSnapshot.filesByPath.keys)
@@ -14,6 +16,7 @@ struct FolderCompareService {
 
         var identicalFiles: [PathPair] = []
         var samePathDifferentSizeFiles: [PathPair] = []
+        var processedCommonPathCount = 0
 
         // 1. 先按相对路径精确匹配，识别完全一致和同路径不同大小的文件。
         for path in commonPaths {
@@ -29,6 +32,20 @@ struct FolderCompareService {
             } else {
                 samePathDifferentSizeFiles.append(pair)
             }
+
+            processedCommonPathCount += 1
+            if shouldReportProgress(current: processedCommonPathCount, total: commonPaths.count) {
+                progress(
+                    CompareProgress(
+                        phase: .matchingPaths,
+                        currentPath: path,
+                        leftDiscoveredCount: leftSnapshot.filesByPath.count,
+                        rightDiscoveredCount: rightSnapshot.filesByPath.count,
+                        processedCount: processedCommonPathCount,
+                        totalCount: commonPaths.count
+                    )
+                )
+            }
         }
 
         let leftUnmatchedFiles = leftPaths.subtracting(commonPaths).compactMap { leftSnapshot.filesByPath[$0] }
@@ -41,6 +58,7 @@ struct FolderCompareService {
         var sameSizeDifferentPathSet: Set<String> = []
         var sameSizeCounterpartsByPath: [String: [FileRecord]] = [:]
         var sameSizeCounterpartSideByPath: [String: CompareSide] = [:]
+        var processedSameSizeGroupCount = 0
 
         // 2. 再从未命中路径的文件中，按大小归类，识别“大小一致但路径不同”的文件组。
         for size in sameSizes {
@@ -65,20 +83,37 @@ struct FolderCompareService {
                 sameSizeCounterpartsByPath[rightFile.relativePath] = leftFiles
                 sameSizeCounterpartSideByPath[rightFile.relativePath] = .left
             }
+
+            processedSameSizeGroupCount += 1
+            if shouldReportProgress(current: processedSameSizeGroupCount, total: sameSizes.count) {
+                progress(
+                    CompareProgress(
+                        phase: .groupingSameSize,
+                        currentPath: leftFiles.first?.relativePath ?? rightFiles.first?.relativePath,
+                        leftDiscoveredCount: leftSnapshot.filesByPath.count,
+                        rightDiscoveredCount: rightSnapshot.filesByPath.count,
+                        processedCount: processedSameSizeGroupCount,
+                        totalCount: sameSizes.count
+                    )
+                )
+            }
         }
 
         // 3. 剩余没有任何对应关系的文件，归入左右独有结果，便于用户快速定位缺失项。
         let leftOnlyFiles = leftUnmatchedFiles.filter { !sameSizeDifferentPathSet.contains($0.relativePath) }.sorted(by: compareFiles)
         let rightOnlyFiles = rightUnmatchedFiles.filter { !sameSizeDifferentPathSet.contains($0.relativePath) }.sorted(by: compareFiles)
 
-        let directoryIndex = buildDirectoryIndex(
+        let directoryIndex = try buildDirectoryIndex(
             leftFiles: leftSnapshot.filesByPath,
             rightFiles: rightSnapshot.filesByPath,
             identicalFiles: Set(identicalFiles.map(\.relativePath)),
             samePathDifferentSizeFiles: Set(samePathDifferentSizeFiles.map(\.relativePath)),
             sameSizeDifferentPathFiles: sameSizeDifferentPathSet,
             sameSizeCounterpartsByPath: sameSizeCounterpartsByPath,
-            sameSizeCounterpartSideByPath: sameSizeCounterpartSideByPath
+            sameSizeCounterpartSideByPath: sameSizeCounterpartSideByPath,
+            discoveredLeftCount: leftSnapshot.filesByPath.count,
+            discoveredRightCount: rightSnapshot.filesByPath.count,
+            progress: progress
         )
 
         let summary = CompareSummary(
@@ -145,7 +180,7 @@ struct FolderCompareService {
         }
     }
 
-    private func snapshot(for folder: URL) throws -> FolderSnapshot {
+    private func snapshot(for folder: URL, side: CompareSide, otherSideCount: Int, progress: @escaping @Sendable (CompareProgress) -> Void) throws -> FolderSnapshot {
         let rootURL = folder.standardizedFileURL
         let rootPath = rootURL.path
 
@@ -155,6 +190,7 @@ struct FolderCompareService {
 
         var filesByPath: [String: FileRecord] = [:]
         var scannedCount = 0
+        var discoveredFileCount = 0
 
         // 1. 递归遍历目录，只收集常规文件，避免文件夹参与大小比较。
         for case let fileURL as URL in enumerator {
@@ -176,17 +212,25 @@ struct FolderCompareService {
             let relativePath = String(filePath.dropFirst(rootPath.count + 1))
             let size = UInt64(values.fileSize ?? 0)
             filesByPath[relativePath] = FileRecord(relativePath: relativePath, absolutePath: filePath, size: size)
+            discoveredFileCount += 1
+
+            if shouldReportProgress(current: discoveredFileCount, total: nil) {
+                progress(makeSnapshotProgress(side: side, currentPath: relativePath, discoveredFileCount: discoveredFileCount, otherSideCount: otherSideCount))
+            }
         }
 
+        progress(makeSnapshotProgress(side: side, currentPath: nil, discoveredFileCount: discoveredFileCount, otherSideCount: otherSideCount))
         return FolderSnapshot(rootPath: rootPath, filesByPath: filesByPath)
     }
 
-    private func buildDirectoryIndex(leftFiles: [String: FileRecord], rightFiles: [String: FileRecord], identicalFiles: Set<String>, samePathDifferentSizeFiles: Set<String>, sameSizeDifferentPathFiles: Set<String>, sameSizeCounterpartsByPath: [String: [FileRecord]], sameSizeCounterpartSideByPath: [String: CompareSide]) -> DirectoryIndex {
+    private func buildDirectoryIndex(leftFiles: [String: FileRecord], rightFiles: [String: FileRecord], identicalFiles: Set<String>, samePathDifferentSizeFiles: Set<String>, sameSizeDifferentPathFiles: Set<String>, sameSizeCounterpartsByPath: [String: [FileRecord]], sameSizeCounterpartSideByPath: [String: CompareSide], discoveredLeftCount: Int, discoveredRightCount: Int, progress: @escaping @Sendable (CompareProgress) -> Void) throws -> DirectoryIndex {
         let root = MutableDirectoryNode(name: "", path: "")
         let allPaths = Set(leftFiles.keys).union(rightFiles.keys).sorted(by: compareRelativePaths)
+        var processedIndexCount = 0
 
         // 1. 只把目录结构和每个目录的直接子项写入索引，避免构建整棵文件树。
         for path in allPaths {
+            try Task.checkCancellation()
             let leftFile = leftFiles[path]
             let rightFile = rightFiles[path]
             let status = statusForPath(path: path, leftFile: leftFile, rightFile: rightFile, identicalFiles: identicalFiles, samePathDifferentSizeFiles: samePathDifferentSizeFiles, sameSizeDifferentPathFiles: sameSizeDifferentPathFiles)
@@ -208,12 +252,43 @@ struct FolderCompareService {
             )
 
             root.insertFile(pathComponents: pathComponents, item: item)
+            processedIndexCount += 1
+
+            if shouldReportProgress(current: processedIndexCount, total: allPaths.count) {
+                progress(
+                    CompareProgress(
+                        phase: .buildingIndex,
+                        currentPath: path,
+                        leftDiscoveredCount: discoveredLeftCount,
+                        rightDiscoveredCount: discoveredRightCount,
+                        processedCount: processedIndexCount,
+                        totalCount: allPaths.count
+                    )
+                )
+            }
         }
 
         var itemsByPath: [String: [DirectoryItem]] = [:]
         let roots = root.children.values.map { $0.freeze(into: &itemsByPath, sorter: compareDirectoryItems) }.sorted(by: compareDirectoryNodes)
         itemsByPath[""] = root.listingItems(sortedChildren: roots).sorted(by: compareDirectoryItems)
         return DirectoryIndex(roots: roots, itemsByPath: itemsByPath)
+    }
+
+    private func shouldReportProgress(current: Int, total: Int?) -> Bool {
+        if let total, current >= total {
+            return true
+        }
+
+        return current.isMultiple(of: 128)
+    }
+
+    private func makeSnapshotProgress(side: CompareSide, currentPath: String?, discoveredFileCount: Int, otherSideCount: Int) -> CompareProgress {
+        switch side {
+        case .left:
+            return CompareProgress(phase: .scanningLeft, currentPath: currentPath, leftDiscoveredCount: discoveredFileCount, rightDiscoveredCount: otherSideCount, processedCount: discoveredFileCount, totalCount: nil)
+        case .right:
+            return CompareProgress(phase: .scanningRight, currentPath: currentPath, leftDiscoveredCount: otherSideCount, rightDiscoveredCount: discoveredFileCount, processedCount: discoveredFileCount, totalCount: nil)
+        }
     }
 
     private func statusForPath(path: String, leftFile: FileRecord?, rightFile: FileRecord?, identicalFiles: Set<String>, samePathDifferentSizeFiles: Set<String>, sameSizeDifferentPathFiles: Set<String>) -> DiffStatus {

@@ -9,6 +9,7 @@ final class FolderCompareViewModel: ObservableObject {
     @Published var leftFolderPath = ""
     @Published var rightFolderPath = ""
     @Published var compareResult: CompareResult?
+    @Published var compareProgress: CompareProgress?
     @Published var isComparing = false
     @Published var errorMessage: String?
     @Published var activeOperationMessage: String?
@@ -105,6 +106,7 @@ final class FolderCompareViewModel: ObservableObject {
         compareTask = nil
         isComparing = false
         activeOperationMessage = nil
+        compareProgress = nil
     }
 
     private func startCompare(leftPath: String, rightPath: String, saveHistory shouldSaveHistory: Bool, operationMessage: String?) {
@@ -115,6 +117,7 @@ final class FolderCompareViewModel: ObservableObject {
         isComparing = true
         errorMessage = nil
         activeOperationMessage = operationMessage
+        compareProgress = CompareProgress(phase: .preparing, currentPath: nil, leftDiscoveredCount: 0, rightDiscoveredCount: 0, processedCount: 0, totalCount: nil)
 
         compareTask = Task { [weak self] in
             guard let self else {
@@ -123,7 +126,7 @@ final class FolderCompareViewModel: ObservableObject {
 
             do {
                 // 1. 在后台任务中执行目录扫描和文件归类，避免主线程在大目录下失去响应。
-                let result = try await compareInBackground(leftPath: leftPath, rightPath: rightPath)
+                let result = try await compareInBackground(leftPath: leftPath, rightPath: rightPath, generation: generation)
                 try Task.checkCancellation()
 
                 guard generation == compareGeneration else {
@@ -137,6 +140,7 @@ final class FolderCompareViewModel: ObservableObject {
                 }
                 isComparing = false
                 activeOperationMessage = nil
+                compareProgress = nil
             } catch is CancellationError {
                 guard generation == compareGeneration else {
                     return
@@ -144,6 +148,7 @@ final class FolderCompareViewModel: ObservableObject {
 
                 isComparing = false
                 activeOperationMessage = nil
+                compareProgress = nil
             } catch {
                 guard generation == compareGeneration else {
                     return
@@ -153,6 +158,7 @@ final class FolderCompareViewModel: ObservableObject {
                 compareResult = nil
                 isComparing = false
                 activeOperationMessage = nil
+                compareProgress = nil
             }
         }
     }
@@ -172,6 +178,7 @@ final class FolderCompareViewModel: ObservableObject {
         isComparing = true
         errorMessage = nil
         activeOperationMessage = message
+        compareProgress = CompareProgress(phase: .preparing, currentPath: nil, leftDiscoveredCount: 0, rightDiscoveredCount: 0, processedCount: 0, totalCount: nil)
 
         compareTask = Task { [weak self] in
             guard let self else {
@@ -184,7 +191,7 @@ final class FolderCompareViewModel: ObservableObject {
                 try Task.checkCancellation()
 
                 // 2. 操作完成后复用统一的后台对比流程，确保结果和统计一次性刷新。
-                let result = try await compareInBackground(leftPath: leftPath, rightPath: rightPath)
+                let result = try await compareInBackground(leftPath: leftPath, rightPath: rightPath, generation: generation)
                 try Task.checkCancellation()
 
                 guard generation == compareGeneration else {
@@ -194,6 +201,7 @@ final class FolderCompareViewModel: ObservableObject {
                 compareResult = result
                 isComparing = false
                 activeOperationMessage = nil
+                compareProgress = nil
             } catch is CancellationError {
                 guard generation == compareGeneration else {
                     return
@@ -201,6 +209,7 @@ final class FolderCompareViewModel: ObservableObject {
 
                 isComparing = false
                 activeOperationMessage = nil
+                compareProgress = nil
             } catch {
                 guard generation == compareGeneration else {
                     return
@@ -209,14 +218,23 @@ final class FolderCompareViewModel: ObservableObject {
                 errorMessage = error.localizedDescription
                 isComparing = false
                 activeOperationMessage = nil
+                compareProgress = nil
             }
         }
     }
 
-    private func compareInBackground(leftPath: String, rightPath: String) async throws -> CompareResult {
+    private func compareInBackground(leftPath: String, rightPath: String, generation: Int) async throws -> CompareResult {
         try await Task.detached(priority: .userInitiated) {
             let service = FolderCompareService()
-            return try service.compare(leftFolder: URL(fileURLWithPath: leftPath), rightFolder: URL(fileURLWithPath: rightPath))
+            return try service.compare(leftFolder: URL(fileURLWithPath: leftPath), rightFolder: URL(fileURLWithPath: rightPath)) { progress in
+                Task { @MainActor [weak self] in
+                    guard let self, generation == self.compareGeneration else {
+                        return
+                    }
+
+                    self.compareProgress = progress
+                }
+            }
         }.value
     }
 

@@ -112,6 +112,49 @@ struct CompareSummary: Sendable {
     let rightOnlyCount: Int
 }
 
+enum CompareProgressPhase: String, Sendable {
+    case preparing
+    case scanningLeft
+    case scanningRight
+    case matchingPaths
+    case groupingSameSize
+    case buildingIndex
+
+    var displayName: String {
+        switch self {
+        case .preparing:
+            "准备对比"
+        case .scanningLeft:
+            "扫描左侧"
+        case .scanningRight:
+            "扫描右侧"
+        case .matchingPaths:
+            "按路径比对"
+        case .groupingSameSize:
+            "按大小归组"
+        case .buildingIndex:
+            "生成结果索引"
+        }
+    }
+}
+
+struct CompareProgress: Sendable {
+    let phase: CompareProgressPhase
+    let currentPath: String?
+    let leftDiscoveredCount: Int
+    let rightDiscoveredCount: Int
+    let processedCount: Int
+    let totalCount: Int?
+
+    var fractionCompleted: Double? {
+        guard let totalCount, totalCount > 0 else {
+            return nil
+        }
+
+        return min(max(Double(processedCount) / Double(totalCount), 0), 1)
+    }
+}
+
 struct CompareResult: Sendable {
     let leftRootPath: String
     let rightRootPath: String
