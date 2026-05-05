@@ -59,6 +59,29 @@ enum DiffStatus: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum CompareSide: String, Hashable, Sendable {
+    case left
+    case right
+
+    var displayName: String {
+        switch self {
+        case .left:
+            "左侧"
+        case .right:
+            "右侧"
+        }
+    }
+
+    var opposite: CompareSide {
+        switch self {
+        case .left:
+            .right
+        case .right:
+            .left
+        }
+    }
+}
+
 struct PathPair: Identifiable, Hashable, Sendable {
     let relativePath: String
     let left: FileRecord
@@ -76,27 +99,6 @@ struct SizeMatchGroup: Identifiable, Hashable, Sendable {
         let leftKey = leftFiles.map(\.relativePath).sorted().joined(separator: "|")
         let rightKey = rightFiles.map(\.relativePath).sorted().joined(separator: "|")
         return "\(size)#\(leftKey)#\(rightKey)"
-    }
-}
-
-struct SideOnlyFile: Identifiable, Hashable, Sendable {
-    let side: CompareSide
-    let file: FileRecord
-
-    var id: String { side.rawValue + "#" + file.id }
-}
-
-enum CompareSide: String, Hashable, Sendable {
-    case left
-    case right
-
-    var displayName: String {
-        switch self {
-        case .left:
-            "左侧"
-        case .right:
-            "右侧"
-        }
     }
 }
 
@@ -118,24 +120,49 @@ struct CompareResult: Sendable {
     let sameSizeDifferentPathGroups: [SizeMatchGroup]
     let leftOnlyFiles: [FileRecord]
     let rightOnlyFiles: [FileRecord]
-    let treeRoots: [FileTreeNode]
+    let directoryRoots: [DirectoryNode]
+    let directoryItemsByPath: [String: [DirectoryItem]]
     let summary: CompareSummary
 }
 
-struct FileTreeNode: Identifiable, Hashable, Sendable {
+struct DirectoryNode: Identifiable, Hashable, Sendable {
     let path: String
     let name: String
-    let fullPath: String
+    let status: DiffStatus
+    let containedStatuses: Set<DiffStatus>
+    let children: [DirectoryNode]
+
+    var id: String { path }
+}
+
+struct DirectoryItem: Identifiable, Hashable, Sendable {
+    let path: String
+    let name: String
+    let directoryPath: String
     let isDirectory: Bool
     let status: DiffStatus
-    let leftAbsolutePath: String?
-    let rightAbsolutePath: String?
-    let leftSize: UInt64?
-    let rightSize: UInt64?
-    let children: [FileTreeNode]
+    let leftFile: FileRecord?
+    let rightFile: FileRecord?
+    let counterpartFiles: [FileRecord]
+    let counterpartSide: CompareSide?
 
-    var id: String { fullPath }
-    var childNodes: [FileTreeNode]? { children.isEmpty ? nil : children }
+    var id: String { path }
+    var leftSize: UInt64? { leftFile?.size }
+    var rightSize: UInt64? { rightFile?.size }
+    var leftAbsolutePath: String? { leftFile?.absolutePath }
+    var rightAbsolutePath: String? { rightFile?.absolutePath }
+
+    var primarySide: CompareSide? {
+        if leftFile != nil, rightFile == nil {
+            return .left
+        }
+
+        if leftFile == nil, rightFile != nil {
+            return .right
+        }
+
+        return nil
+    }
 }
 
 struct FolderSnapshot: Sendable {
@@ -155,4 +182,11 @@ struct CompareHistoryItem: Identifiable, Hashable, Codable, Sendable {
         self.rightPath = rightPath
         self.comparedAt = comparedAt
     }
+}
+
+struct PendingDeleteAction: Identifiable, Hashable {
+    let side: CompareSide
+    let file: FileRecord
+
+    var id: String { side.rawValue + "#" + file.id }
 }

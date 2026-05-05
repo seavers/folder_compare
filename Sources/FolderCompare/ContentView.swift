@@ -1,8 +1,8 @@
-import AppKit
 import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var viewModel: FolderCompareViewModel
+    @State private var selectedFilter: DiffStatus?
 
     var body: some View {
         ZStack {
@@ -11,8 +11,8 @@ struct ContentView: View {
 
             VStack(spacing: 10) {
                 CompactToolbarView(viewModel: viewModel)
-                SummaryStripView(result: viewModel.compareResult, isComparing: viewModel.isComparing)
-                ResultWorkspaceView(viewModel: viewModel)
+                SummaryStripView(result: viewModel.compareResult, isComparing: viewModel.isComparing, selectedFilter: $selectedFilter)
+                ResultWorkspaceView(viewModel: viewModel, selectedFilter: $selectedFilter)
             }
             .padding(14)
         }
@@ -27,6 +27,9 @@ struct ContentView: View {
                     .clipShape(Capsule())
                     .padding(.top, 10)
             }
+        }
+        .onChange(of: viewModel.compareResult?.summary.leftCount) { _ in
+            selectedFilter = nil
         }
     }
 
@@ -44,52 +47,40 @@ private struct CompactToolbarView: View {
     @State private var isHistoryPresented = false
 
     var body: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("文件夹对比工具")
-                        .font(AppTypography.title)
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("文件夹对比工具")
+                    .font(AppTypography.title)
 
-                    Text("对比路径与大小")
-                        .font(AppTypography.small)
-                        .foregroundStyle(.secondary)
-                }
+                Text("对比路径与大小")
+                    .font(AppTypography.small)
+                    .foregroundStyle(.secondary)
+            }
 
-                Spacer(minLength: 12)
+            Spacer(minLength: 12)
 
-                FolderInputField(title: "左侧", path: $viewModel.leftFolderPath, tint: .blue) {
-                    viewModel.chooseFolder(for: .left)
-                }
+            FolderInputField(title: "左侧", path: $viewModel.leftFolderPath, tint: .blue) {
+                viewModel.chooseFolder(for: .left)
+            }
 
-                FolderInputField(title: "右侧", path: $viewModel.rightFolderPath, tint: .indigo) {
-                    viewModel.chooseFolder(for: .right)
-                }
+            ToolbarIconButton(symbol: "arrow.left.arrow.right") {
+                viewModel.swapFolders()
+            }
 
-                Button {
+            FolderInputField(title: "右侧", path: $viewModel.rightFolderPath, tint: .indigo) {
+                viewModel.chooseFolder(for: .right)
+            }
+
+            PersistentAccentButton(title: viewModel.isComparing ? "取消对比" : "开始对比", isLoading: false) {
+                if viewModel.isComparing {
+                    viewModel.cancelCompare()
+                } else {
                     viewModel.compareFolders()
-                } label: {
-                    HStack(spacing: 6) {
-                        if viewModel.isComparing {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
-
-                        Text(viewModel.isComparing ? "处理中" : "开始对比")
-                            .font(AppTypography.smallStrong)
-                    }
-                    .frame(minWidth: 94)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(viewModel.isComparing)
+            }
 
-                Button("历史记录") {
-                    isHistoryPresented = true
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .font(AppTypography.smallStrong)
-                .disabled(viewModel.historyItems.isEmpty)
+            ToolbarTextButton(title: "历史记录", isDisabled: viewModel.historyItems.isEmpty) {
+                isHistoryPresented = true
             }
         }
         .padding(.horizontal, 14)
@@ -117,10 +108,7 @@ private struct FolderInputField: View {
                 .textFieldStyle(.roundedBorder)
                 .font(AppTypography.body)
 
-            Button("浏览", action: action)
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .font(AppTypography.small)
+            ToolbarTextButton(title: "浏览", action: action)
         }
         .frame(maxWidth: .infinity)
     }
@@ -129,6 +117,7 @@ private struct FolderInputField: View {
 private struct SummaryStripView: View {
     let result: CompareResult?
     let isComparing: Bool
+    @Binding var selectedFilter: DiffStatus?
 
     var body: some View {
         Group {
@@ -137,11 +126,11 @@ private struct SummaryStripView: View {
                     HStack(spacing: 8) {
                         SummaryChip(title: "左侧", value: result.summary.leftCount, tint: .blue)
                         SummaryChip(title: "右侧", value: result.summary.rightCount, tint: .indigo)
-                        SummaryChip(title: "一致", value: result.summary.identicalCount, tint: .green)
-                        SummaryChip(title: "同路径异大小", value: result.summary.samePathDifferentSizeCount, tint: .orange)
-                        SummaryChip(title: "同大小异路径", value: result.summary.sameSizeDifferentPathCount, tint: .mint)
-                        SummaryChip(title: "仅左侧", value: result.summary.leftOnlyCount, tint: .red)
-                        SummaryChip(title: "仅右侧", value: result.summary.rightOnlyCount, tint: .pink)
+                        FilterChip(status: .identical, value: result.summary.identicalCount, selectedFilter: $selectedFilter)
+                        FilterChip(status: .samePathDifferentSize, value: result.summary.samePathDifferentSizeCount, selectedFilter: $selectedFilter)
+                        FilterChip(status: .sameSizeDifferentPath, value: result.summary.sameSizeDifferentPathCount, selectedFilter: $selectedFilter)
+                        FilterChip(status: .leftOnly, value: result.summary.leftOnlyCount, selectedFilter: $selectedFilter)
+                        FilterChip(status: .rightOnly, value: result.summary.rightOnlyCount, selectedFilter: $selectedFilter)
                     }
                     .padding(.vertical, 2)
                 }
@@ -187,10 +176,55 @@ private struct SummaryChip: View {
     }
 }
 
+private struct FilterChip: View {
+    let status: DiffStatus
+    let value: Int
+    @Binding var selectedFilter: DiffStatus?
+    @State private var isHovered = false
+
+    private var isSelected: Bool {
+        selectedFilter == status
+    }
+
+    var body: some View {
+        Button {
+            selectedFilter = isSelected ? nil : status
+        } label: {
+            HStack(spacing: 8) {
+                Text(status.compactDisplayName)
+                    .font(AppTypography.small)
+
+                Text("\(value)")
+                    .font(AppTypography.smallStrong)
+            }
+            .foregroundStyle(isSelected ? .white : status.color)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(backgroundColor)
+            .clipShape(Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(status.color.opacity(isSelected ? 0 : 0.22), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+
+    private var backgroundColor: Color {
+        if isSelected {
+            return status.color
+        }
+
+        return isHovered ? status.color.opacity(0.14) : status.color.opacity(0.08)
+    }
+}
+
 private struct ResultWorkspaceView: View {
     @ObservedObject var viewModel: FolderCompareViewModel
+    @Binding var selectedFilter: DiffStatus?
     @State private var viewMode = ViewMode.tree
-    @State private var deleteCandidate: FileRecord?
+    @State private var deleteCandidate: PendingDeleteAction?
 
     var body: some View {
         VStack(spacing: 10) {
@@ -199,29 +233,33 @@ private struct ResultWorkspaceView: View {
                     .font(AppTypography.section)
 
                 if let result = viewModel.compareResult {
-                    Text("\(result.summary.leftCount + result.summary.rightCount) 个文件")
+                    Text(summaryText(for: result))
                         .font(AppTypography.small)
                         .foregroundStyle(.secondary)
                 }
 
                 Spacer(minLength: 12)
 
-                Picker("视图", selection: $viewMode) {
-                    ForEach(ViewMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 220)
+                ModeSwitch(selectedMode: $viewMode)
             }
 
             Group {
                 if let result = viewModel.compareResult {
                     switch viewMode {
                     case .tree:
-                        TreeSplitResultView(result: result, onDeleteRequest: { deleteCandidate = $0 }, onCopyRequest: viewModel.copyRightOnlyFileToLeft)
+                        TreeSplitResultView(
+                            result: result,
+                            selectedFilter: selectedFilter,
+                            onDeleteRequest: { side, file in deleteCandidate = PendingDeleteAction(side: side, file: file) },
+                            onCopyRequest: viewModel.copyFile(_:to:)
+                        )
                     case .flat:
-                        FlatResultView(result: result, onDeleteRequest: { deleteCandidate = $0 }, onCopyRequest: viewModel.copyRightOnlyFileToLeft)
+                        FlatResultView(
+                            result: result,
+                            selectedFilter: selectedFilter,
+                            onDeleteRequest: { side, file in deleteCandidate = PendingDeleteAction(side: side, file: file) },
+                            onCopyRequest: viewModel.copyFile(_:to:)
+                        )
                     }
                 } else {
                     EmptyWorkspaceView()
@@ -232,22 +270,30 @@ private struct ResultWorkspaceView: View {
         .padding(14)
         .panelSurface()
         .confirmationDialog(
-            "删除左侧文件？",
+            deleteCandidate == nil ? "删除文件？" : "删除\(deleteCandidate?.side.displayName ?? "")文件？",
             isPresented: Binding(
                 get: { deleteCandidate != nil },
                 set: { if !$0 { deleteCandidate = nil } }
             ),
             presenting: deleteCandidate
-        ) { file in
+        ) { candidate in
             Button("删除", role: .destructive) {
-                viewModel.deleteLeftOnlyFile(file)
+                viewModel.deleteFile(candidate.file, from: candidate.side)
                 deleteCandidate = nil
             }
 
             Button("取消", role: .cancel) {}
-        } message: { file in
-            Text(file.relativePath)
+        } message: { candidate in
+            Text(candidate.file.relativePath)
         }
+    }
+
+    private func summaryText(for result: CompareResult) -> String {
+        if let selectedFilter {
+            return "已筛选：\(selectedFilter.displayName)"
+        }
+
+        return "左 \(result.summary.leftCount) / 右 \(result.summary.rightCount)"
     }
 }
 
@@ -267,6 +313,29 @@ private enum ViewMode: String, CaseIterable, Identifiable {
     }
 }
 
+private struct ModeSwitch: View {
+    @Binding var selectedMode: ViewMode
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(ViewMode.allCases) { mode in
+                Button {
+                    selectedMode = mode
+                } label: {
+                    Text(mode.displayName)
+                        .font(AppTypography.smallStrong)
+                        .foregroundStyle(selectedMode == mode ? .white : .secondary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(selectedMode == mode ? Color.accentColor : Color.primary.opacity(0.06))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
 private struct EmptyWorkspaceView: View {
     var body: some View {
         VStack(spacing: 10) {
@@ -277,7 +346,7 @@ private struct EmptyWorkspaceView: View {
             Text("暂无结果")
                 .font(AppTypography.section)
 
-            Text("主区域会优先展示可操作的对比列表。")
+            Text("主区域会优先展示目录与可操作文件。")
                 .font(AppTypography.small)
                 .foregroundStyle(.secondary)
         }
@@ -289,53 +358,70 @@ private struct EmptyWorkspaceView: View {
 
 private struct TreeSplitResultView: View {
     let result: CompareResult
-    let onDeleteRequest: (FileRecord) -> Void
-    let onCopyRequest: (FileRecord) -> Void
+    let selectedFilter: DiffStatus?
+    let onDeleteRequest: (CompareSide, FileRecord) -> Void
+    let onCopyRequest: (FileRecord, CompareSide) -> Void
     @State private var expandedNodes: Set<String> = []
     @State private var selectedDirectoryPath = ""
 
-    private var treeIdentity: String {
-        [
-            result.leftRootPath,
-            result.rightRootPath,
-            "\(result.summary.leftCount)",
-            "\(result.summary.rightCount)",
-            "\(result.summary.leftOnlyCount)",
-            "\(result.summary.rightOnlyCount)"
-        ].joined(separator: "|")
-    }
-
     var body: some View {
         HSplitView {
-            DirectorySidebarView(directoryRoots: directoryRoots, selectedDirectoryPath: $selectedDirectoryPath, expandedNodes: $expandedNodes)
-                .frame(minWidth: 220, idealWidth: 260, maxWidth: 320)
+            DirectorySidebarView(
+                directoryRoots: visibleDirectoryRoots,
+                selectedFilter: selectedFilter,
+                selectedDirectoryPath: $selectedDirectoryPath,
+                expandedNodes: $expandedNodes
+            )
+            .frame(minWidth: 240, idealWidth: 280, maxWidth: 340)
 
             DirectoryDetailView(
                 directoryPath: selectedDirectoryPath,
-                nodes: currentNodes,
+                nodes: currentItems,
                 onDeleteRequest: onDeleteRequest,
                 onCopyRequest: onCopyRequest,
                 onOpenDirectory: openDirectory
             )
-            .frame(minWidth: 540)
+            .frame(minWidth: 560)
         }
-        .id(treeIdentity)
+        .onAppear {
+            expandedNodes = []
+            selectedDirectoryPath = ""
+        }
     }
 
-    private var directoryRoots: [FileTreeNode] {
-        result.treeRoots.filter(\.isDirectory)
+    private var visibleDirectoryRoots: [DirectoryNode] {
+        result.directoryRoots.filter(matchesFilter)
     }
 
-    private var currentNodes: [FileTreeNode] {
-        if selectedDirectoryPath.isEmpty {
-            return result.treeRoots
+    private var currentItems: [DirectoryItem] {
+        let items = result.directoryItemsByPath[selectedDirectoryPath] ?? []
+        guard let selectedFilter else {
+            return items
         }
 
-        return findDirectoryNode(path: selectedDirectoryPath, in: result.treeRoots)?.children ?? []
+        return items.filter { item in
+            if item.isDirectory {
+                return directoryNode(for: item.path)?.containedStatuses.contains(selectedFilter) == true
+            }
+
+            return item.status == selectedFilter
+        }
     }
 
-    private func findDirectoryNode(path: String, in nodes: [FileTreeNode]) -> FileTreeNode? {
-        for node in nodes where node.isDirectory {
+    private func matchesFilter(_ node: DirectoryNode) -> Bool {
+        guard let selectedFilter else {
+            return true
+        }
+
+        return node.containedStatuses.contains(selectedFilter)
+    }
+
+    private func directoryNode(for path: String) -> DirectoryNode? {
+        findDirectoryNode(path: path, in: result.directoryRoots)
+    }
+
+    private func findDirectoryNode(path: String, in nodes: [DirectoryNode]) -> DirectoryNode? {
+        for node in nodes {
             if node.path == path {
                 return node
             }
@@ -349,11 +435,6 @@ private struct TreeSplitResultView: View {
     }
 
     private func openDirectory(_ path: String) {
-        guard !path.isEmpty else {
-            selectedDirectoryPath = ""
-            return
-        }
-
         selectedDirectoryPath = path
         expandAncestors(for: path)
     }
@@ -373,7 +454,8 @@ private struct TreeSplitResultView: View {
 }
 
 private struct DirectorySidebarView: View {
-    let directoryRoots: [FileTreeNode]
+    let directoryRoots: [DirectoryNode]
+    let selectedFilter: DiffStatus?
     @Binding var selectedDirectoryPath: String
     @Binding var expandedNodes: Set<String>
 
@@ -390,7 +472,7 @@ private struct DirectorySidebarView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
                     ForEach(directoryRoots) { node in
-                        DirectoryTreeRowView(node: node, depth: 0, selectedDirectoryPath: $selectedDirectoryPath, expandedNodes: $expandedNodes)
+                        DirectoryTreeRowView(node: node, selectedFilter: selectedFilter, depth: 0, selectedDirectoryPath: $selectedDirectoryPath, expandedNodes: $expandedNodes)
                     }
                 }
                 .padding(.horizontal, 6)
@@ -404,7 +486,8 @@ private struct DirectorySidebarView: View {
 }
 
 private struct DirectoryTreeRowView: View {
-    let node: FileTreeNode
+    let node: DirectoryNode
+    let selectedFilter: DiffStatus?
     let depth: Int
     @Binding var selectedDirectoryPath: String
     @Binding var expandedNodes: Set<String>
@@ -419,23 +502,36 @@ private struct DirectoryTreeRowView: View {
         selectedDirectoryPath == node.path
     }
 
+    private var visibleChildren: [DirectoryNode] {
+        node.children.filter { child in
+            guard let selectedFilter else {
+                return true
+            }
+
+            return child.containedStatuses.contains(selectedFilter)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                Color.clear.frame(width: CGFloat(depth) * 12)
+                Color.clear.frame(width: CGFloat(depth) * 14)
 
-                Button(action: toggleExpanded) {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(isArrowHovered ? .primary : .secondary)
-                        .frame(width: 28, height: 28)
-                        .background(isArrowHovered ? Color.primary.opacity(0.08) : Color.clear)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-                .buttonStyle(.plain)
-                .onHover { hovering in
-                    isArrowHovered = hovering
-                    updateCursor(isHovering: hovering)
+                Group {
+                    if visibleChildren.isEmpty {
+                        Color.clear.frame(width: 28, height: 28)
+                    } else {
+                        Button(action: toggleExpanded) {
+                            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(isArrowHovered ? .primary : .secondary)
+                                .frame(width: 28, height: 28)
+                                .background(isArrowHovered ? Color.primary.opacity(0.08) : Color.clear)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { isArrowHovered = $0 }
+                    }
                 }
 
                 HStack(spacing: 6) {
@@ -458,15 +554,12 @@ private struct DirectoryTreeRowView: View {
                 .onTapGesture {
                     selectedDirectoryPath = node.path
                 }
-                .onHover { hovering in
-                    isHovered = hovering
-                    updateCursor(isHovering: hovering)
-                }
+                .onHover { isHovered = $0 }
             }
 
             if isExpanded {
-                ForEach(node.children.filter(\.isDirectory)) { child in
-                    DirectoryTreeRowView(node: child, depth: depth + 1, selectedDirectoryPath: $selectedDirectoryPath, expandedNodes: $expandedNodes)
+                ForEach(visibleChildren) { child in
+                    DirectoryTreeRowView(node: child, selectedFilter: selectedFilter, depth: depth + 1, selectedDirectoryPath: $selectedDirectoryPath, expandedNodes: $expandedNodes)
                 }
             }
         }
@@ -477,11 +570,7 @@ private struct DirectoryTreeRowView: View {
             return Color.accentColor.opacity(0.14)
         }
 
-        if isHovered {
-            return Color.primary.opacity(0.06)
-        }
-
-        return .clear
+        return isHovered ? Color.primary.opacity(0.06) : .clear
     }
 
     private func toggleExpanded() {
@@ -496,21 +585,13 @@ private struct DirectoryTreeRowView: View {
             }
         }
     }
-
-    private func updateCursor(isHovering: Bool) {
-        if isHovering {
-            NSCursor.pointingHand.push()
-        } else {
-            NSCursor.pop()
-        }
-    }
 }
 
 private struct DirectoryDetailView: View {
     let directoryPath: String
-    let nodes: [FileTreeNode]
-    let onDeleteRequest: (FileRecord) -> Void
-    let onCopyRequest: (FileRecord) -> Void
+    let nodes: [DirectoryItem]
+    let onDeleteRequest: (CompareSide, FileRecord) -> Void
+    let onCopyRequest: (FileRecord, CompareSide) -> Void
     let onOpenDirectory: (String) -> Void
 
     var body: some View {
@@ -518,6 +599,8 @@ private struct DirectoryDetailView: View {
             HStack {
                 Text(detailTitle)
                     .font(AppTypography.smallStrong)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
 
                 Spacer(minLength: 12)
 
@@ -533,19 +616,19 @@ private struct DirectoryDetailView: View {
 
                 Text("状态")
                     .font(AppTypography.smallStrong)
-                    .frame(width: 104, alignment: .leading)
+                    .frame(width: 116, alignment: .leading)
 
                 Text("左侧")
                     .font(AppTypography.smallStrong)
-                    .frame(width: 88, alignment: .trailing)
+                    .frame(width: 96, alignment: .trailing)
 
                 Text("右侧")
                     .font(AppTypography.smallStrong)
-                    .frame(width: 88, alignment: .trailing)
+                    .frame(width: 96, alignment: .trailing)
 
                 Text("操作")
                     .font(AppTypography.smallStrong)
-                    .frame(width: 92, alignment: .leading)
+                    .frame(width: 120, alignment: .leading)
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, 12)
@@ -567,42 +650,48 @@ private struct DirectoryDetailView: View {
     }
 
     private var detailTitle: String {
-        directoryPath.isEmpty ? "根目录文件列表" : directoryPath
+        directoryPath.isEmpty ? "根目录" : directoryPath
     }
 }
 
 private struct DetailListRowView: View {
-    let node: FileTreeNode
-    let onDeleteRequest: (FileRecord) -> Void
-    let onCopyRequest: (FileRecord) -> Void
+    let node: DirectoryItem
+    let onDeleteRequest: (CompareSide, FileRecord) -> Void
+    let onCopyRequest: (FileRecord, CompareSide) -> Void
     let onOpenDirectory: (String) -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            HStack(spacing: 6) {
-                Image(systemName: node.isDirectory ? "folder.fill" : "doc")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(node.isDirectory ? Color(nsColor: .systemYellow) : .secondary)
-                    .frame(width: 18)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: node.isDirectory ? "folder.fill" : "doc")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(node.isDirectory ? Color(nsColor: .systemYellow) : .secondary)
+                        .frame(width: 18)
 
-                Text(node.name)
-                    .font(AppTypography.nodeName)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                    Text(node.name)
+                        .font(AppTypography.nodeName)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                if !node.isDirectory, node.status == .sameSizeDifferentPath {
+                    SameSizePathPopoverButton(item: node)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             StatusBadge(status: node.status)
-                .frame(width: 104, alignment: .leading)
+                .frame(width: 116, alignment: .leading)
 
             SizeValueView(value: node.leftSize)
-                .frame(width: 88, alignment: .trailing)
+                .frame(width: 96, alignment: .trailing)
 
             SizeValueView(value: node.rightSize)
-                .frame(width: 88, alignment: .trailing)
+                .frame(width: 96, alignment: .trailing)
 
             DetailActionView(node: node, onDeleteRequest: onDeleteRequest, onCopyRequest: onCopyRequest, onOpenDirectory: onOpenDirectory)
-                .frame(width: 92, alignment: .leading)
+                .frame(width: 120, alignment: .leading)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -612,9 +701,9 @@ private struct DetailListRowView: View {
 }
 
 private struct DetailActionView: View {
-    let node: FileTreeNode
-    let onDeleteRequest: (FileRecord) -> Void
-    let onCopyRequest: (FileRecord) -> Void
+    let node: DirectoryItem
+    let onDeleteRequest: (CompareSide, FileRecord) -> Void
+    let onCopyRequest: (FileRecord, CompareSide) -> Void
     let onOpenDirectory: (String) -> Void
 
     var body: some View {
@@ -623,14 +712,8 @@ private struct DetailActionView: View {
             HoverActionButton(title: "进入") {
                 onOpenDirectory(node.path)
             }
-        case let .delete(file):
-            HoverActionButton(title: "删除左侧", role: .destructive) {
-                onDeleteRequest(file)
-            }
-        case let .copy(file):
-            HoverActionButton(title: "拷到左侧") {
-                onCopyRequest(file)
-            }
+        case let .menu(items):
+            ActionMenuButton(title: "操作", items: items)
         case .none:
             Text("无操作")
                 .font(AppTypography.small)
@@ -645,17 +728,39 @@ private struct DetailActionView: View {
 
         switch node.status {
         case .leftOnly:
-            guard let leftSize = node.leftSize, let leftAbsolutePath = node.leftAbsolutePath else {
+            guard let leftFile = node.leftFile else {
                 return .none
             }
 
-            return .delete(FileRecord(relativePath: node.path, absolutePath: leftAbsolutePath, size: leftSize))
+            return .menu(items: [
+                ActionMenuItem(title: "拷到右侧") { onCopyRequest(leftFile, .right) },
+                ActionMenuItem(title: "删除左侧", isDestructive: true) { onDeleteRequest(.left, leftFile) }
+            ])
         case .rightOnly:
-            guard let rightSize = node.rightSize, let rightAbsolutePath = node.rightAbsolutePath else {
+            guard let rightFile = node.rightFile else {
                 return .none
             }
 
-            return .copy(FileRecord(relativePath: node.path, absolutePath: rightAbsolutePath, size: rightSize))
+            return .menu(items: [
+                ActionMenuItem(title: "拷到左侧") { onCopyRequest(rightFile, .left) },
+                ActionMenuItem(title: "删除右侧", isDestructive: true) { onDeleteRequest(.right, rightFile) }
+            ])
+        case .sameSizeDifferentPath:
+            if let leftFile = node.leftFile, node.primarySide == .left {
+                return .menu(items: [
+                    ActionMenuItem(title: "拷到右侧") { onCopyRequest(leftFile, .right) },
+                    ActionMenuItem(title: "删除左侧", isDestructive: true) { onDeleteRequest(.left, leftFile) }
+                ])
+            }
+
+            if let rightFile = node.rightFile, node.primarySide == .right {
+                return .menu(items: [
+                    ActionMenuItem(title: "拷到左侧") { onCopyRequest(rightFile, .left) },
+                    ActionMenuItem(title: "删除右侧", isDestructive: true) { onDeleteRequest(.right, rightFile) }
+                ])
+            }
+
+            return .none
         default:
             return .none
         }
@@ -664,8 +769,7 @@ private struct DetailActionView: View {
 
 private enum DetailAction {
     case openDirectory
-    case delete(FileRecord)
-    case copy(FileRecord)
+    case menu(items: [ActionMenuItem])
     case none
 }
 
@@ -673,17 +777,10 @@ private struct SizeValueView: View {
     let value: UInt64?
 
     var body: some View {
-        Group {
-            if let value {
-                Text(SizeFormatter.string(from: value))
-                    .font(AppTypography.mono)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            } else {
-                Text("")
-                    .font(AppTypography.mono)
-            }
-        }
+        Text(SizeFormatter.string(from: value))
+            .font(AppTypography.mono)
+            .foregroundStyle(value == nil ? .tertiary : .secondary)
+            .lineLimit(1)
     }
 }
 
@@ -705,14 +802,7 @@ private struct SidebarRootRowView: View {
         .background(backgroundColor)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .onTapGesture(perform: action)
-        .onHover { hovering in
-            isHovered = hovering
-            if hovering {
-                NSCursor.pointingHand.push()
-            } else {
-                NSCursor.pop()
-            }
-        }
+        .onHover { isHovered = $0 }
     }
 
     private var backgroundColor: Color {
@@ -720,75 +810,170 @@ private struct SidebarRootRowView: View {
             return Color.accentColor.opacity(0.12)
         }
 
-        if isHovered {
-            return Color.primary.opacity(0.06)
-        }
-
-        return .clear
+        return isHovered ? Color.primary.opacity(0.06) : .clear
     }
 }
 
 private struct HoverActionButton: View {
     let title: String
-    var role: ButtonRole?
     let action: () -> Void
     @State private var isHovered = false
 
     var body: some View {
-        Button(role: role, action: action) {
+        Button(action: action) {
             Text(title)
                 .font(AppTypography.small)
-                .foregroundStyle(foregroundColor)
+                .foregroundStyle(isHovered ? Color.accentColor : .secondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
-                .background(backgroundColor)
+                .background(isHovered ? Color.accentColor.opacity(0.12) : Color.clear)
                 .clipShape(Capsule())
-                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .onHover { hovering in
-            isHovered = hovering
-            if hovering {
-                NSCursor.pointingHand.push()
-            } else {
-                NSCursor.pop()
+        .onHover { isHovered = $0 }
+    }
+}
+
+private struct ActionMenuButton: View {
+    let title: String
+    let items: [ActionMenuItem]
+    @State private var isHovered = false
+
+    var body: some View {
+        Menu {
+            ForEach(items) { item in
+                Button(item.title, role: item.isDestructive ? .destructive : nil, action: item.action)
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(title)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .font(AppTypography.small)
+            .foregroundStyle(isHovered ? Color.accentColor : .secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(isHovered ? Color.accentColor.opacity(0.12) : Color.clear)
+            .clipShape(Capsule())
+        }
+        .menuStyle(.borderlessButton)
+        .onHover { isHovered = $0 }
+    }
+}
+
+private struct ActionMenuItem: Identifiable {
+    let id = UUID()
+    let title: String
+    let isDestructive: Bool
+    let action: () -> Void
+
+    init(title: String, isDestructive: Bool = false, action: @escaping () -> Void) {
+        self.title = title
+        self.isDestructive = isDestructive
+        self.action = action
+    }
+}
+
+private struct SameSizePathPopoverButton: View {
+    let item: DirectoryItem
+    @State private var isPresented = false
+
+    var body: some View {
+        Button("查看两侧路径") {
+            isPresented = true
+        }
+        .buttonStyle(.plain)
+        .font(AppTypography.small)
+        .foregroundStyle(.secondary)
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            SameSizePathPopoverContent(item: item)
+        }
+    }
+}
+
+private struct SameSizePathPopoverContent: View {
+    let item: DirectoryItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("同大小异路径")
+                .font(AppTypography.section)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(currentSide.displayName)
+                    .font(AppTypography.smallStrong)
+                    .foregroundStyle(currentSide == .left ? Color.blue : Color.indigo)
+
+                Text(currentFile.relativePath)
+                    .font(AppTypography.mono)
+                    .textSelection(.enabled)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(counterpartSide.displayName)
+                    .font(AppTypography.smallStrong)
+                    .foregroundStyle(counterpartSide == .left ? Color.blue : Color.indigo)
+
+                ForEach(item.counterpartFiles) { file in
+                    Text(file.relativePath)
+                        .font(AppTypography.mono)
+                        .textSelection(.enabled)
+                }
             }
         }
+        .padding(16)
+        .frame(minWidth: 420)
     }
 
-    private var foregroundColor: Color {
-        if role == .destructive {
-            return isHovered ? Color.red : Color.red.opacity(0.92)
-        }
-
-        return isHovered ? Color.accentColor : .secondary
+    private var currentSide: CompareSide {
+        item.primarySide ?? .left
     }
 
-    private var backgroundColor: Color {
-        if role == .destructive {
-            return isHovered ? Color.red.opacity(0.12) : Color.clear
-        }
+    private var currentFile: FileRecord {
+        item.leftFile ?? item.rightFile ?? FileRecord(relativePath: item.path, absolutePath: "", size: 0)
+    }
 
-        return isHovered ? Color.accentColor.opacity(0.12) : Color.clear
+    private var counterpartSide: CompareSide {
+        item.counterpartSide ?? currentSide.opposite
     }
 }
 
 private struct FlatResultView: View {
     let result: CompareResult
-    let onDeleteRequest: (FileRecord) -> Void
-    let onCopyRequest: (FileRecord) -> Void
+    let selectedFilter: DiffStatus?
+    let onDeleteRequest: (CompareSide, FileRecord) -> Void
+    let onCopyRequest: (FileRecord, CompareSide) -> Void
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
-                PairSectionView(title: "路径和大小一致", pairs: result.identicalFiles, tint: .green, showBothSizes: false)
-                PairSectionView(title: "路径一致大小不同", pairs: result.samePathDifferentSizeFiles, tint: .orange, showBothSizes: true)
-                SameSizeDifferentPathSectionView(groups: result.sameSizeDifferentPathGroups)
-                SideOnlySectionView(title: "仅左侧存在", files: result.leftOnlyFiles, tint: .red, actionTitle: "删除左侧", action: onDeleteRequest)
-                SideOnlySectionView(title: "仅右侧存在", files: result.rightOnlyFiles, tint: .pink, actionTitle: "拷到左侧", action: onCopyRequest)
+                if shouldShow(.identical) {
+                    PairSectionView(title: "路径和大小一致", pairs: result.identicalFiles, tint: .green, showBothSizes: false)
+                }
+
+                if shouldShow(.samePathDifferentSize) {
+                    PairSectionView(title: "路径一致大小不同", pairs: result.samePathDifferentSizeFiles, tint: .orange, showBothSizes: true)
+                }
+
+                if shouldShow(.sameSizeDifferentPath) {
+                    SameSizeDifferentPathSectionView(groups: result.sameSizeDifferentPathGroups, onDeleteRequest: onDeleteRequest, onCopyRequest: onCopyRequest)
+                }
+
+                if shouldShow(.leftOnly) {
+                    SideOnlySectionView(title: "仅左侧存在", files: result.leftOnlyFiles, tint: .red, side: .left, onDeleteRequest: onDeleteRequest, onCopyRequest: onCopyRequest)
+                }
+
+                if shouldShow(.rightOnly) {
+                    SideOnlySectionView(title: "仅右侧存在", files: result.rightOnlyFiles, tint: .pink, side: .right, onDeleteRequest: onDeleteRequest, onCopyRequest: onCopyRequest)
+                }
             }
             .padding(.vertical, 2)
         }
+    }
+
+    private func shouldShow(_ status: DiffStatus) -> Bool {
+        selectedFilter == nil || selectedFilter == status
     }
 }
 
@@ -835,6 +1020,8 @@ private struct PairSectionView: View {
 
 private struct SameSizeDifferentPathSectionView: View {
     let groups: [SizeMatchGroup]
+    let onDeleteRequest: (CompareSide, FileRecord) -> Void
+    let onCopyRequest: (FileRecord, CompareSide) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -848,8 +1035,8 @@ private struct SameSizeDifferentPathSectionView: View {
                         MetaValueView(title: "文件大小", value: SizeFormatter.string(from: group.size))
 
                         HStack(alignment: .top, spacing: 12) {
-                            PathColumnView(title: "左侧", files: group.leftFiles, tint: .blue)
-                            PathColumnView(title: "右侧", files: group.rightFiles, tint: .indigo)
+                            SameSizeGroupColumn(title: "左侧", files: group.leftFiles, tint: .blue, side: .left, onDeleteRequest: onDeleteRequest, onCopyRequest: onCopyRequest)
+                            SameSizeGroupColumn(title: "右侧", files: group.rightFiles, tint: .indigo, side: .right, onDeleteRequest: onDeleteRequest, onCopyRequest: onCopyRequest)
                         }
                     }
                     .padding(12)
@@ -861,12 +1048,52 @@ private struct SameSizeDifferentPathSectionView: View {
     }
 }
 
+private struct SameSizeGroupColumn: View {
+    let title: String
+    let files: [FileRecord]
+    let tint: Color
+    let side: CompareSide
+    let onDeleteRequest: (CompareSide, FileRecord) -> Void
+    let onCopyRequest: (FileRecord, CompareSide) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(AppTypography.smallStrong)
+                .foregroundStyle(tint)
+
+            ForEach(files) { file in
+                HStack(alignment: .top, spacing: 8) {
+                    Text(file.relativePath)
+                        .font(AppTypography.mono)
+                        .lineLimit(3)
+
+                    Spacer(minLength: 8)
+
+                    ActionMenuButton(
+                        title: "操作",
+                        items: [
+                            ActionMenuItem(title: side == .left ? "拷到右侧" : "拷到左侧") { onCopyRequest(file, side.opposite) },
+                            ActionMenuItem(title: side == .left ? "删除左侧" : "删除右侧", isDestructive: true) { onDeleteRequest(side, file) }
+                        ]
+                    )
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(tint.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
 private struct SideOnlySectionView: View {
     let title: String
     let files: [FileRecord]
     let tint: Color
-    let actionTitle: String
-    let action: (FileRecord) -> Void
+    let side: CompareSide
+    let onDeleteRequest: (CompareSide, FileRecord) -> Void
+    let onCopyRequest: (FileRecord, CompareSide) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -889,12 +1116,13 @@ private struct SideOnlySectionView: View {
 
                         Spacer(minLength: 12)
 
-                        Button(actionTitle) {
-                            action(file)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .font(AppTypography.small)
+                        ActionMenuButton(
+                            title: "操作",
+                            items: [
+                                ActionMenuItem(title: side == .left ? "拷到右侧" : "拷到左侧") { onCopyRequest(file, side.opposite) },
+                                ActionMenuItem(title: side == .left ? "删除左侧" : "删除右侧", isDestructive: true) { onDeleteRequest(side, file) }
+                            ]
+                        )
                     }
                     .padding(12)
                     .background(Color(nsColor: .textBackgroundColor).opacity(0.78))
@@ -906,30 +1134,6 @@ private struct SideOnlySectionView: View {
                 }
             }
         }
-    }
-}
-
-private struct PathColumnView: View {
-    let title: String
-    let files: [FileRecord]
-    let tint: Color
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(AppTypography.smallStrong)
-                .foregroundStyle(tint)
-
-            ForEach(files) { file in
-                Text(file.relativePath)
-                    .font(AppTypography.mono)
-                    .lineLimit(2)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(tint.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -1012,12 +1216,10 @@ private struct HistorySheetView: View {
 
                         Spacer(minLength: 12)
 
-                        Button("重新对比") {
+                        PersistentAccentButton(title: "重新对比", compact: true) {
                             viewModel.compare(using: item)
                             dismiss()
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
                     }
                     .padding(.vertical, 4)
                 }
@@ -1048,6 +1250,77 @@ private struct StatusBadge: View {
             .clipShape(Capsule())
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
+    }
+}
+
+private struct PersistentAccentButton: View {
+    let title: String
+    var isLoading: Bool = false
+    var compact: Bool = false
+    var action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                }
+
+                Text(title)
+                    .font(AppTypography.smallStrong)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, compact ? 12 : 18)
+            .padding(.vertical, compact ? 7 : 9)
+            .background(isHovered ? Color.accentColor.opacity(0.88) : Color.accentColor)
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+}
+
+private struct ToolbarTextButton: View {
+    let title: String
+    var isDisabled = false
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(AppTypography.smallStrong)
+                .foregroundStyle(isDisabled ? .tertiary : .primary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(isHovered && !isDisabled ? Color.primary.opacity(0.08) : Color.primary.opacity(0.04))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .onHover { isHovered = $0 }
+    }
+}
+
+private struct ToolbarIconButton: View {
+    let symbol: String
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 34, height: 34)
+                .background(isHovered ? Color.primary.opacity(0.08) : Color.primary.opacity(0.04))
+                .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
     }
 }
 

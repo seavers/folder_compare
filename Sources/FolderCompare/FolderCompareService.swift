@@ -15,8 +15,10 @@ struct FolderCompareService {
         var identicalFiles: [PathPair] = []
         var samePathDifferentSizeFiles: [PathPair] = []
 
-        // 1. 先按相对路径做一轮精确匹配，识别完全一致和同路径不同大小的文件。
+        // 1. 先按相对路径精确匹配，识别完全一致和同路径不同大小的文件。
         for path in commonPaths {
+            try Task.checkCancellation()
+
             guard let leftFile = leftSnapshot.filesByPath[path], let rightFile = rightSnapshot.filesByPath[path] else {
                 continue
             }
@@ -29,48 +31,54 @@ struct FolderCompareService {
             }
         }
 
-        let leftUnmatchedPaths = leftPaths.subtracting(commonPaths)
-        let rightUnmatchedPaths = rightPaths.subtracting(commonPaths)
-
-        let leftUnmatchedFiles = leftUnmatchedPaths.compactMap { leftSnapshot.filesByPath[$0] }
-        let rightUnmatchedFiles = rightUnmatchedPaths.compactMap { rightSnapshot.filesByPath[$0] }
-
+        let leftUnmatchedFiles = leftPaths.subtracting(commonPaths).compactMap { leftSnapshot.filesByPath[$0] }
+        let rightUnmatchedFiles = rightPaths.subtracting(commonPaths).compactMap { rightSnapshot.filesByPath[$0] }
         let leftGroupsBySize = Dictionary(grouping: leftUnmatchedFiles, by: \.size)
         let rightGroupsBySize = Dictionary(grouping: rightUnmatchedFiles, by: \.size)
         let sameSizes = Set(leftGroupsBySize.keys).intersection(rightGroupsBySize.keys).sorted()
 
         var sameSizeDifferentPathGroups: [SizeMatchGroup] = []
         var sameSizeDifferentPathSet: Set<String> = []
+        var sameSizeCounterpartsByPath: [String: [FileRecord]] = [:]
+        var sameSizeCounterpartSideByPath: [String: CompareSide] = [:]
 
         // 2. 再从未命中路径的文件中，按大小归类，识别“大小一致但路径不同”的文件组。
         for size in sameSizes {
+            try Task.checkCancellation()
+
             let leftFiles = sortFiles(leftGroupsBySize[size] ?? [])
             let rightFiles = sortFiles(rightGroupsBySize[size] ?? [])
-
             guard !leftFiles.isEmpty, !rightFiles.isEmpty else {
                 continue
             }
 
             sameSizeDifferentPathGroups.append(SizeMatchGroup(size: size, leftFiles: leftFiles, rightFiles: rightFiles))
-            leftFiles.forEach { sameSizeDifferentPathSet.insert($0.relativePath) }
-            rightFiles.forEach { sameSizeDifferentPathSet.insert($0.relativePath) }
+
+            for leftFile in leftFiles {
+                sameSizeDifferentPathSet.insert(leftFile.relativePath)
+                sameSizeCounterpartsByPath[leftFile.relativePath] = rightFiles
+                sameSizeCounterpartSideByPath[leftFile.relativePath] = .right
+            }
+
+            for rightFile in rightFiles {
+                sameSizeDifferentPathSet.insert(rightFile.relativePath)
+                sameSizeCounterpartsByPath[rightFile.relativePath] = leftFiles
+                sameSizeCounterpartSideByPath[rightFile.relativePath] = .left
+            }
         }
 
         // 3. 剩余没有任何对应关系的文件，归入左右独有结果，便于用户快速定位缺失项。
-        let leftOnlyFiles = leftUnmatchedFiles
-            .filter { !sameSizeDifferentPathSet.contains($0.relativePath) }
-            .sorted(by: compareFiles)
+        let leftOnlyFiles = leftUnmatchedFiles.filter { !sameSizeDifferentPathSet.contains($0.relativePath) }.sorted(by: compareFiles)
+        let rightOnlyFiles = rightUnmatchedFiles.filter { !sameSizeDifferentPathSet.contains($0.relativePath) }.sorted(by: compareFiles)
 
-        let rightOnlyFiles = rightUnmatchedFiles
-            .filter { !sameSizeDifferentPathSet.contains($0.relativePath) }
-            .sorted(by: compareFiles)
-
-        let treeRoots = buildTree(
+        let directoryIndex = buildDirectoryIndex(
             leftFiles: leftSnapshot.filesByPath,
             rightFiles: rightSnapshot.filesByPath,
             identicalFiles: Set(identicalFiles.map(\.relativePath)),
             samePathDifferentSizeFiles: Set(samePathDifferentSizeFiles.map(\.relativePath)),
-            sameSizeDifferentPathFiles: sameSizeDifferentPathSet
+            sameSizeDifferentPathFiles: sameSizeDifferentPathSet,
+            sameSizeCounterpartsByPath: sameSizeCounterpartsByPath,
+            sameSizeCounterpartSideByPath: sameSizeCounterpartSideByPath
         )
 
         let summary = CompareSummary(
@@ -91,33 +99,37 @@ struct FolderCompareService {
             sameSizeDifferentPathGroups: sameSizeDifferentPathGroups.sorted { $0.size < $1.size },
             leftOnlyFiles: leftOnlyFiles,
             rightOnlyFiles: rightOnlyFiles,
-            treeRoots: treeRoots,
+            directoryRoots: directoryIndex.roots,
+            directoryItemsByPath: directoryIndex.itemsByPath,
             summary: summary
         )
     }
 
-    func deleteLeftOnlyFile(_ file: FileRecord, leftRoot: URL) throws {
+    func deleteFile(_ file: FileRecord, from side: CompareSide, root: URL) throws {
         let fileURL = URL(fileURLWithPath: file.absolutePath)
-        guard fileURL.path.hasPrefix(leftRoot.path + "/") else {
-            throw FolderCompareError.invalidFileOperation("目标文件不在左侧目录下：\(file.relativePath)")
+        let rootPath = root.standardizedFileURL.path
+        let filePath = fileURL.standardizedFileURL.path
+
+        guard filePath.hasPrefix(rootPath + "/") else {
+            throw FolderCompareError.invalidFileOperation("目标文件不在\(side.displayName)目录下：\(file.relativePath)")
         }
 
-        // 1. 删除左侧独有文件，避免误删比较范围外的内容。
+        // 1. 删除当前侧文件，避免误删比较范围外的内容。
         try fileManager.removeItem(at: fileURL)
 
-        // 2. 自底向上清理空目录，保持左侧目录结构整洁，但不会越过根目录。
-        try pruneEmptyDirectories(from: fileURL.deletingLastPathComponent(), root: leftRoot)
+        // 2. 自底向上清理空目录，保持目标侧目录结构整洁，但不会越过根目录。
+        try pruneEmptyDirectories(from: fileURL.deletingLastPathComponent(), root: root.standardizedFileURL)
     }
 
-    func copyRightOnlyFileToLeft(_ file: FileRecord, leftRoot: URL) throws {
+    func copyFile(_ file: FileRecord, to destinationRoot: URL) throws {
         let sourceURL = URL(fileURLWithPath: file.absolutePath)
-        let destinationURL = leftRoot.appendingPathComponent(file.relativePath)
+        let destinationURL = destinationRoot.appendingPathComponent(file.relativePath)
 
-        // 1. 先确保目标父目录存在，再执行复制，保证右侧独有文件能完整落入左侧对应层级。
+        // 1. 先确保目标父目录存在，再执行复制，保证文件能落到目标侧对应层级。
         try fileManager.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
 
         if fileManager.fileExists(atPath: destinationURL.path) {
-            throw FolderCompareError.invalidFileOperation("左侧已存在同名文件：\(file.relativePath)")
+            throw FolderCompareError.invalidFileOperation("目标侧已存在同名文件：\(file.relativePath)")
         }
 
         // 2. 直接调用系统 cp 复制文件并保留元数据，避免为时间戳额外发起一次属性读取。
@@ -134,53 +146,74 @@ struct FolderCompareService {
     }
 
     private func snapshot(for folder: URL) throws -> FolderSnapshot {
-        guard let enumerator = fileManager.enumerator(at: folder, includingPropertiesForKeys: Array(resourceKeys), options: [.skipsHiddenFiles]) else {
-            throw FolderCompareError.unableToEnumerateFolder(folder.path)
+        let rootURL = folder.standardizedFileURL
+        let rootPath = rootURL.path
+
+        guard let enumerator = fileManager.enumerator(at: rootURL, includingPropertiesForKeys: Array(resourceKeys), options: [.skipsHiddenFiles]) else {
+            throw FolderCompareError.unableToEnumerateFolder(rootPath)
         }
 
         var filesByPath: [String: FileRecord] = [:]
+        var scannedCount = 0
 
         // 1. 递归遍历目录，只收集常规文件，避免文件夹参与大小比较。
         for case let fileURL as URL in enumerator {
+            scannedCount += 1
+            if scannedCount.isMultiple(of: 128) {
+                try Task.checkCancellation()
+            }
+
             let values = try fileURL.resourceValues(forKeys: resourceKeys)
             guard values.isRegularFile == true else {
                 continue
             }
 
-            let relativePath = fileURL.path.replacingOccurrences(of: folder.path + "/", with: "")
+            let filePath = fileURL.standardizedFileURL.path
+            guard filePath.hasPrefix(rootPath + "/") else {
+                continue
+            }
+
+            let relativePath = String(filePath.dropFirst(rootPath.count + 1))
             let size = UInt64(values.fileSize ?? 0)
-            filesByPath[relativePath] = FileRecord(relativePath: relativePath, absolutePath: fileURL.path, size: size)
+            filesByPath[relativePath] = FileRecord(relativePath: relativePath, absolutePath: filePath, size: size)
         }
 
-        return FolderSnapshot(rootPath: folder.path, filesByPath: filesByPath)
+        return FolderSnapshot(rootPath: rootPath, filesByPath: filesByPath)
     }
 
-    private func buildTree(leftFiles: [String: FileRecord], rightFiles: [String: FileRecord], identicalFiles: Set<String>, samePathDifferentSizeFiles: Set<String>, sameSizeDifferentPathFiles: Set<String>) -> [FileTreeNode] {
-        let root = MutableTreeNode(name: "", path: "", isDirectory: true)
+    private func buildDirectoryIndex(leftFiles: [String: FileRecord], rightFiles: [String: FileRecord], identicalFiles: Set<String>, samePathDifferentSizeFiles: Set<String>, sameSizeDifferentPathFiles: Set<String>, sameSizeCounterpartsByPath: [String: [FileRecord]], sameSizeCounterpartSideByPath: [String: CompareSide]) -> DirectoryIndex {
+        let root = MutableDirectoryNode(name: "", path: "")
         let allPaths = Set(leftFiles.keys).union(rightFiles.keys).sorted(by: compareRelativePaths)
 
-        // 1. 逐个相对路径写入树节点，为后续目录聚合展示准备结构。
+        // 1. 只把目录结构和每个目录的直接子项写入索引，避免构建整棵文件树。
         for path in allPaths {
             let leftFile = leftFiles[path]
             let rightFile = rightFiles[path]
             let status = statusForPath(path: path, leftFile: leftFile, rightFile: rightFile, identicalFiles: identicalFiles, samePathDifferentSizeFiles: samePathDifferentSizeFiles, sameSizeDifferentPathFiles: sameSizeDifferentPathFiles)
+            let pathComponents = path.split(separator: "/").map(String.init)
+            guard let fileName = pathComponents.last else {
+                continue
+            }
 
-            root.insert(
-                pathComponents: path.split(separator: "/").map(String.init),
-                fullPath: path,
-                leftAbsolutePath: leftFile?.absolutePath,
-                rightAbsolutePath: rightFile?.absolutePath,
-                leftSize: leftFile?.size,
-                rightSize: rightFile?.size,
-                status: status
+            let item = DirectoryItem(
+                path: path,
+                name: fileName,
+                directoryPath: directoryPath(for: path),
+                isDirectory: false,
+                status: status,
+                leftFile: leftFile,
+                rightFile: rightFile,
+                counterpartFiles: sameSizeCounterpartsByPath[path] ?? [],
+                counterpartSide: sameSizeCounterpartSideByPath[path]
             )
+
+            root.insertFile(pathComponents: pathComponents, item: item)
         }
 
-        // 2. 完成文件节点插入后，自底向上计算目录状态，输出适合 SwiftUI 展示的不可变树结构。
-        return root.children
-            .map(\.value)
-            .map { $0.freeze(parentPath: "") }
-            .sorted(by: compareTreeNodes)
+        var itemsByPath: [String: [DirectoryItem]] = [:]
+        let roots = root.children.values.map { $0.freeze(into: &itemsByPath, sorter: compareDirectoryItems) }.sorted(by: compareDirectoryNodes)
+        itemsByPath[""] = root.listingItems(sortedChildren: roots).sorted(by: compareDirectoryItems)
+        return DirectoryIndex(roots: roots, itemsByPath: itemsByPath)
     }
 
     private func statusForPath(path: String, leftFile: FileRecord?, rightFile: FileRecord?, identicalFiles: Set<String>, samePathDifferentSizeFiles: Set<String>, sameSizeDifferentPathFiles: Set<String>) -> DiffStatus {
@@ -207,10 +240,16 @@ struct FolderCompareService {
         return .mixed
     }
 
-    private func pruneEmptyDirectories(from directoryURL: URL, root: URL) throws {
-        var currentURL = directoryURL
+    private func directoryPath(for relativePath: String) -> String {
+        let directory = (relativePath as NSString).deletingLastPathComponent
+        return directory == "." ? "" : directory
+    }
 
-        while currentURL.path != root.path {
+    private func pruneEmptyDirectories(from directoryURL: URL, root: URL) throws {
+        var currentURL = directoryURL.standardizedFileURL
+        let rootURL = root.standardizedFileURL
+
+        while currentURL.path != rootURL.path {
             let contents = try fileManager.contentsOfDirectory(atPath: currentURL.path)
             guard contents.isEmpty else {
                 return
@@ -233,7 +272,11 @@ struct FolderCompareService {
         compareRelativePaths(lhs.relativePath, rhs.relativePath)
     }
 
-    private func compareTreeNodes(_ lhs: FileTreeNode, _ rhs: FileTreeNode) -> Bool {
+    private func compareDirectoryNodes(_ lhs: DirectoryNode, _ rhs: DirectoryNode) -> Bool {
+        compareNames(lhs.name, rhs.name)
+    }
+
+    private func compareDirectoryItems(_ lhs: DirectoryItem, _ rhs: DirectoryItem) -> Bool {
         if lhs.isDirectory != rhs.isDirectory {
             return lhs.isDirectory && !rhs.isDirectory
         }
@@ -268,12 +311,7 @@ struct FolderCompareService {
         let leftKey = lhs.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
         let rightKey = rhs.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
         let result = leftKey.compare(rightKey, options: [.widthInsensitive, .forcedOrdering], locale: Locale(identifier: "zh_Hans_CN"))
-
-        if result == .orderedSame {
-            return lhs < rhs
-        }
-
-        return result == .orderedAscending
+        return result == .orderedSame ? lhs < rhs : result == .orderedAscending
     }
 
     private func sortCategory(for name: String) -> Int {
@@ -311,120 +349,71 @@ enum FolderCompareError: LocalizedError {
     }
 }
 
-private final class MutableTreeNode {
+private struct DirectoryIndex {
+    let roots: [DirectoryNode]
+    let itemsByPath: [String: [DirectoryItem]]
+}
+
+private final class MutableDirectoryNode {
     let name: String
     let path: String
-    let isDirectory: Bool
-    var leftAbsolutePath: String?
-    var rightAbsolutePath: String?
-    var leftSize: UInt64?
-    var rightSize: UInt64?
-    var status: DiffStatus
-    var children: [String: MutableTreeNode]
+    var fileItems: [DirectoryItem] = []
+    var children: [String: MutableDirectoryNode] = [:]
+    var containedStatuses: Set<DiffStatus> = []
 
-    init(name: String, path: String, isDirectory: Bool, leftAbsolutePath: String? = nil, rightAbsolutePath: String? = nil, leftSize: UInt64? = nil, rightSize: UInt64? = nil, status: DiffStatus = .folder, children: [String: MutableTreeNode] = [:]) {
+    init(name: String, path: String) {
         self.name = name
         self.path = path
-        self.isDirectory = isDirectory
-        self.leftAbsolutePath = leftAbsolutePath
-        self.rightAbsolutePath = rightAbsolutePath
-        self.leftSize = leftSize
-        self.rightSize = rightSize
-        self.status = status
-        self.children = children
     }
 
-    func insert(pathComponents: [String], fullPath: String, leftAbsolutePath: String?, rightAbsolutePath: String?, leftSize: UInt64?, rightSize: UInt64?, status: DiffStatus) {
-        guard let head = pathComponents.first else {
-            return
-        }
+    func insertFile(pathComponents: [String], item: DirectoryItem) {
+        containedStatuses.insert(item.status)
 
-        if pathComponents.count == 1 {
-            children[head] = MutableTreeNode(name: head, path: fullPath, isDirectory: false, leftAbsolutePath: leftAbsolutePath, rightAbsolutePath: rightAbsolutePath, leftSize: leftSize, rightSize: rightSize, status: status)
+        guard pathComponents.count > 1, let head = pathComponents.first else {
+            fileItems.append(item)
             return
         }
 
         let childPath = path.isEmpty ? head : path + "/" + head
-        let child = children[head] ?? MutableTreeNode(name: head, path: childPath, isDirectory: true)
+        let child = children[head] ?? MutableDirectoryNode(name: head, path: childPath)
         children[head] = child
-        child.insert(pathComponents: Array(pathComponents.dropFirst()), fullPath: fullPath, leftAbsolutePath: leftAbsolutePath, rightAbsolutePath: rightAbsolutePath, leftSize: leftSize, rightSize: rightSize, status: status)
+        child.insertFile(pathComponents: Array(pathComponents.dropFirst()), item: item)
+        containedStatuses.formUnion(child.containedStatuses)
     }
 
-    func freeze(parentPath: String) -> FileTreeNode {
-        let childNodes = children.values
-            .map { $0.freeze(parentPath: path) }
-            .sorted {
-                if $0.isDirectory != $1.isDirectory {
-                    return $0.isDirectory && !$1.isDirectory
-                }
-
-                return sortName($0.name, $1.name)
-            }
-
-        let resolvedPath = path.isEmpty ? name : path
-        let resolvedStatus: DiffStatus
-
-        if isDirectory {
-            let childStatuses = Set(childNodes.map(\.status))
-            if childStatuses.count == 1, let onlyStatus = childStatuses.first {
-                resolvedStatus = onlyStatus == .folder ? .folder : onlyStatus
-            } else {
-                resolvedStatus = childStatuses.isEmpty ? .folder : .mixed
-            }
-        } else {
-            resolvedStatus = status
+    func freeze(into itemsByPath: inout [String: [DirectoryItem]], sorter: (DirectoryItem, DirectoryItem) -> Bool) -> DirectoryNode {
+        let frozenChildren = children.values.map { $0.freeze(into: &itemsByPath, sorter: sorter) }.sorted { lhs, rhs in
+            sorter(
+                DirectoryItem(path: lhs.path, name: lhs.name, directoryPath: path, isDirectory: true, status: lhs.status, leftFile: nil, rightFile: nil, counterpartFiles: [], counterpartSide: nil),
+                DirectoryItem(path: rhs.path, name: rhs.name, directoryPath: path, isDirectory: true, status: rhs.status, leftFile: nil, rightFile: nil, counterpartFiles: [], counterpartSide: nil)
+            )
         }
 
-        return FileTreeNode(
-            path: resolvedPath,
-            name: name,
-            fullPath: parentPath.isEmpty ? resolvedPath : parentPath + "/" + name,
-            isDirectory: isDirectory,
-            status: resolvedStatus,
-            leftAbsolutePath: leftAbsolutePath,
-            rightAbsolutePath: rightAbsolutePath,
-            leftSize: leftSize,
-            rightSize: rightSize,
-            children: childNodes
-        )
+        let status = resolveStatus(childStatuses: frozenChildren.map(\.status), ownStatuses: fileItems.map(\.status))
+        let combinedStatuses = containedStatuses.union(frozenChildren.flatMap(\.containedStatuses))
+        itemsByPath[path] = listingItems(sortedChildren: frozenChildren).sorted(by: sorter)
+
+        return DirectoryNode(path: path, name: name, status: status, containedStatuses: combinedStatuses, children: frozenChildren)
     }
 
-    private func sortName(_ lhs: String, _ rhs: String) -> Bool {
-        let leftCategory = sortCategory(for: lhs)
-        let rightCategory = sortCategory(for: rhs)
-
-        if leftCategory != rightCategory {
-            return leftCategory < rightCategory
+    func listingItems(sortedChildren: [DirectoryNode]) -> [DirectoryItem] {
+        let directoryItems = sortedChildren.map {
+            DirectoryItem(path: $0.path, name: $0.name, directoryPath: path, isDirectory: true, status: $0.status, leftFile: nil, rightFile: nil, counterpartFiles: [], counterpartSide: nil)
         }
 
-        let leftKey = lhs.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
-        let rightKey = rhs.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
-        let result = leftKey.compare(rightKey, options: [.widthInsensitive, .forcedOrdering], locale: Locale(identifier: "zh_Hans_CN"))
-
-        if result == .orderedSame {
-            return lhs < rhs
-        }
-
-        return result == .orderedAscending
+        return directoryItems + fileItems
     }
 
-    private func sortCategory(for name: String) -> Int {
-        for scalar in name.unicodeScalars {
-            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
-                continue
-            }
-
-            if scalar.isASCII {
-                return 0
-            }
-
-            if (0x4E00...0x9FFF).contains(scalar.value) {
-                return 2
-            }
-
-            return 1
+    private func resolveStatus(childStatuses: [DiffStatus], ownStatuses: [DiffStatus]) -> DiffStatus {
+        let statusSet = Set(childStatuses + ownStatuses)
+        if statusSet.isEmpty {
+            return .folder
         }
 
-        return 0
+        if statusSet.count == 1, let onlyStatus = statusSet.first {
+            return onlyStatus == .folder ? .mixed : onlyStatus
+        }
+
+        return .mixed
     }
 }

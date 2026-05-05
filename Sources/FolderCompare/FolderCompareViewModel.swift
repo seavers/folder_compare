@@ -14,8 +14,15 @@ final class FolderCompareViewModel: ObservableObject {
     @Published var activeOperationMessage: String?
     @Published var historyItems: [CompareHistoryItem] = []
 
+    private var compareTask: Task<Void, Never>?
+    private var compareGeneration = 0
+
     init() {
         historyItems = loadHistoryItems()
+    }
+
+    deinit {
+        compareTask?.cancel()
     }
 
     func chooseFolder(for side: CompareSide) {
@@ -37,6 +44,12 @@ final class FolderCompareViewModel: ObservableObject {
         }
     }
 
+    func swapFolders() {
+        let currentLeft = leftFolderPath
+        leftFolderPath = rightFolderPath
+        rightFolderPath = currentLeft
+    }
+
     func compareFolders() {
         let leftPath = leftFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
         let rightPath = rightFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -46,28 +59,10 @@ final class FolderCompareViewModel: ObservableObject {
             return
         }
 
-        isComparing = true
-        errorMessage = nil
-        activeOperationMessage = nil
-
-        Task {
-            do {
-                // 1. 在后台任务中执行目录扫描和文件归类，避免主线程在大目录下失去响应。
-                let result = try await compareInBackground(leftPath: leftPath, rightPath: rightPath)
-
-                // 2. 回到主线程更新界面状态，让统计卡片和结果视图同时刷新。
-                compareResult = result
-                saveHistory(leftPath: leftPath, rightPath: rightPath)
-                isComparing = false
-            } catch {
-                errorMessage = error.localizedDescription
-                compareResult = nil
-                isComparing = false
-            }
-        }
+        startCompare(leftPath: leftPath, rightPath: rightPath, saveHistory: true, operationMessage: nil)
     }
 
-    func deleteLeftOnlyFile(_ file: FileRecord) {
+    func deleteFile(_ file: FileRecord, from side: CompareSide) {
         let leftPath = leftFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
         let rightPath = rightFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !leftPath.isEmpty, !rightPath.isEmpty else {
@@ -75,31 +70,15 @@ final class FolderCompareViewModel: ObservableObject {
             return
         }
 
-        isComparing = true
-        errorMessage = nil
-        activeOperationMessage = "正在删除左侧文件..."
-
-        Task {
-            do {
-                // 1. 先在后台删除左侧独有文件，避免大目录操作阻塞界面。
-                try await Task.detached(priority: .userInitiated) {
-                    let service = FolderCompareService()
-                    try service.deleteLeftOnlyFile(file, leftRoot: URL(fileURLWithPath: leftPath))
-                }.value
-
-                // 2. 删除完成后重新执行对比，确保树视图和扁平视图状态同步更新。
-                compareResult = try await compareInBackground(leftPath: leftPath, rightPath: rightPath)
-                isComparing = false
-                activeOperationMessage = nil
-            } catch {
-                errorMessage = error.localizedDescription
-                isComparing = false
-                activeOperationMessage = nil
-            }
+        let rootPath = side == .left ? leftPath : rightPath
+        let message = "正在删除\(side.displayName)文件..."
+        runFileOperation(message: message) {
+            let service = FolderCompareService()
+            try service.deleteFile(file, from: side, root: URL(fileURLWithPath: rootPath))
         }
     }
 
-    func copyRightOnlyFileToLeft(_ file: FileRecord) {
+    func copyFile(_ file: FileRecord, to side: CompareSide) {
         let leftPath = leftFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
         let rightPath = rightFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !leftPath.isEmpty, !rightPath.isEmpty else {
@@ -107,27 +86,11 @@ final class FolderCompareViewModel: ObservableObject {
             return
         }
 
-        isComparing = true
-        errorMessage = nil
-        activeOperationMessage = "正在复制右侧文件到左侧..."
-
-        Task {
-            do {
-                // 1. 先复制右侧独有文件到左侧对应路径，并保留右侧文件时间戳。
-                try await Task.detached(priority: .userInitiated) {
-                    let service = FolderCompareService()
-                    try service.copyRightOnlyFileToLeft(file, leftRoot: URL(fileURLWithPath: leftPath))
-                }.value
-
-                // 2. 复制完成后刷新比对结果，让新增文件立即进入一致或差异分类。
-                compareResult = try await compareInBackground(leftPath: leftPath, rightPath: rightPath)
-                isComparing = false
-                activeOperationMessage = nil
-            } catch {
-                errorMessage = error.localizedDescription
-                isComparing = false
-                activeOperationMessage = nil
-            }
+        let destinationRoot = side == .left ? leftPath : rightPath
+        let message = "正在复制文件到\(side.displayName)..."
+        runFileOperation(message: message) {
+            let service = FolderCompareService()
+            try service.copyFile(file, to: URL(fileURLWithPath: destinationRoot))
         }
     }
 
@@ -135,6 +98,119 @@ final class FolderCompareViewModel: ObservableObject {
         leftFolderPath = historyItem.leftPath
         rightFolderPath = historyItem.rightPath
         compareFolders()
+    }
+
+    func cancelCompare() {
+        compareTask?.cancel()
+        compareTask = nil
+        isComparing = false
+        activeOperationMessage = nil
+    }
+
+    private func startCompare(leftPath: String, rightPath: String, saveHistory shouldSaveHistory: Bool, operationMessage: String?) {
+        compareTask?.cancel()
+        compareGeneration += 1
+        let generation = compareGeneration
+
+        isComparing = true
+        errorMessage = nil
+        activeOperationMessage = operationMessage
+
+        compareTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+
+            do {
+                // 1. 在后台任务中执行目录扫描和文件归类，避免主线程在大目录下失去响应。
+                let result = try await compareInBackground(leftPath: leftPath, rightPath: rightPath)
+                try Task.checkCancellation()
+
+                guard generation == compareGeneration else {
+                    return
+                }
+
+                // 2. 回到主线程更新界面状态，让统计卡片和结果视图同时刷新。
+                compareResult = result
+                if shouldSaveHistory {
+                    saveHistory(leftPath: leftPath, rightPath: rightPath)
+                }
+                isComparing = false
+                activeOperationMessage = nil
+            } catch is CancellationError {
+                guard generation == compareGeneration else {
+                    return
+                }
+
+                isComparing = false
+                activeOperationMessage = nil
+            } catch {
+                guard generation == compareGeneration else {
+                    return
+                }
+
+                errorMessage = error.localizedDescription
+                compareResult = nil
+                isComparing = false
+                activeOperationMessage = nil
+            }
+        }
+    }
+
+    private func runFileOperation(message: String, operation: @escaping @Sendable () throws -> Void) {
+        let leftPath = leftFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rightPath = rightFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !leftPath.isEmpty, !rightPath.isEmpty else {
+            errorMessage = "请先完成左右目录选择。"
+            return
+        }
+
+        compareTask?.cancel()
+        compareGeneration += 1
+        let generation = compareGeneration
+
+        isComparing = true
+        errorMessage = nil
+        activeOperationMessage = message
+
+        compareTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+
+            do {
+                // 1. 先在后台执行删除或复制，避免文件系统操作阻塞界面。
+                try await Task.detached(priority: .userInitiated, operation: operation).value
+                try Task.checkCancellation()
+
+                // 2. 操作完成后复用统一的后台对比流程，确保结果和统计一次性刷新。
+                let result = try await compareInBackground(leftPath: leftPath, rightPath: rightPath)
+                try Task.checkCancellation()
+
+                guard generation == compareGeneration else {
+                    return
+                }
+
+                compareResult = result
+                isComparing = false
+                activeOperationMessage = nil
+            } catch is CancellationError {
+                guard generation == compareGeneration else {
+                    return
+                }
+
+                isComparing = false
+                activeOperationMessage = nil
+            } catch {
+                guard generation == compareGeneration else {
+                    return
+                }
+
+                errorMessage = error.localizedDescription
+                isComparing = false
+                activeOperationMessage = nil
+            }
+        }
     }
 
     private func compareInBackground(leftPath: String, rightPath: String) async throws -> CompareResult {
@@ -147,7 +223,6 @@ final class FolderCompareViewModel: ObservableObject {
     private func saveHistory(leftPath: String, rightPath: String) {
         let normalizedLeft = leftPath.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedRight = rightPath.trimmingCharacters(in: .whitespacesAndNewlines)
-
         guard !normalizedLeft.isEmpty, !normalizedRight.isEmpty else {
             return
         }
