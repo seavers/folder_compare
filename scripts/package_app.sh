@@ -9,6 +9,8 @@ CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 INFO_PLIST_PATH="$CONTENTS_DIR/Info.plist"
+CACHE_DIR="$ROOT_DIR/.cache/clang"
+HOME_DIR="$ROOT_DIR/.home"
 
 cd "$ROOT_DIR"
 
@@ -16,11 +18,13 @@ VERSION_COMMIT_ID="$(git rev-parse --short=7 HEAD)"
 BUILD_DATE="$(date +%F)"
 APP_VERSION="1.0.0.$VERSION_COMMIT_ID"
 
+mkdir -p "$CACHE_DIR" "$HOME_DIR"
+
 # 1. 构建 release 可执行文件，确保打包时使用最新代码。
-swift build -c release
+HOME="$HOME_DIR" CLANG_MODULE_CACHE_PATH="$CACHE_DIR" SWIFTPM_MODULECACHE_OVERRIDE="$CACHE_DIR" swift build --disable-sandbox -c release
 
 # 2. 定位二进制输出目录，并准备标准 macOS app bundle 目录结构。
-BIN_DIR="$(swift build -c release --show-bin-path)"
+BIN_DIR="$(HOME="$HOME_DIR" CLANG_MODULE_CACHE_PATH="$CACHE_DIR" SWIFTPM_MODULECACHE_OVERRIDE="$CACHE_DIR" swift build --disable-sandbox -c release --show-bin-path)"
 EXECUTABLE_PATH="$BIN_DIR/$APP_NAME"
 
 rm -rf "$APP_DIR"
