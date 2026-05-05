@@ -6,6 +6,7 @@ struct FileRecord: Hashable, Identifiable, Sendable {
     let size: UInt64
 
     var id: String { relativePath + "#" + absolutePath }
+    var fileName: String { URL(fileURLWithPath: relativePath).lastPathComponent }
 }
 
 enum DiffStatus: String, CaseIterable, Identifiable, Sendable {
@@ -108,6 +109,8 @@ struct FileTreeNode: Identifiable, Hashable, Sendable {
     let fullPath: String
     let isDirectory: Bool
     let status: DiffStatus
+    let leftAbsolutePath: String?
+    let rightAbsolutePath: String?
     let leftSize: UInt64?
     let rightSize: UInt64?
     let children: [FileTreeNode]
