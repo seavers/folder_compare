@@ -33,6 +33,12 @@ final class FolderCompareViewModel: ObservableObject {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
 
+        // 1. 优先定位到当前输入框路径；如果目标不存在，则回退到最近存在的父目录。
+        let currentPath = (side == .left ? leftFolderPath : rightFolderPath).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let directoryURL = resolveExistingDirectoryURL(for: currentPath) {
+            panel.directoryURL = directoryURL
+        }
+
         guard panel.runModal() == .OK, let url = panel.url else {
             return
         }
@@ -43,6 +49,32 @@ final class FolderCompareViewModel: ObservableObject {
         case .right:
             rightFolderPath = url.path
         }
+    }
+
+    private func resolveExistingDirectoryURL(for path: String) -> URL? {
+        guard !path.isEmpty else {
+            return nil
+        }
+
+        var candidateURL = URL(fileURLWithPath: path).standardizedFileURL
+        var isDirectory: ObjCBool = false
+
+        // 1. 如果当前路径本身存在且是目录，直接作为浏览窗口的初始位置。
+        if FileManager.default.fileExists(atPath: candidateURL.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return candidateURL
+        }
+
+        // 2. 如果路径不存在或不是目录，则逐级回退到最近存在的父目录，兼容 NAS 挂载子路径失效的场景。
+        while candidateURL.path != "/" {
+            candidateURL.deleteLastPathComponent()
+            isDirectory = false
+
+            if FileManager.default.fileExists(atPath: candidateURL.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                return candidateURL
+            }
+        }
+
+        return nil
     }
 
     func swapFolders() {
