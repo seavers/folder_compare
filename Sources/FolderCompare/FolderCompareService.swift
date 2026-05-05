@@ -120,15 +120,17 @@ struct FolderCompareService {
             throw FolderCompareError.invalidFileOperation("左侧已存在同名文件：\(file.relativePath)")
         }
 
-        try fileManager.copyItem(at: sourceURL, to: destinationURL)
+        // 2. 直接调用系统 cp 复制文件并保留元数据，避免为时间戳额外发起一次属性读取。
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/cp")
+        process.arguments = ["-anp", sourceURL.path, destinationURL.path]
 
-        // 2. 复制完成后补齐创建时间和修改时间，保证时间戳与右侧源文件一致。
-        let sourceValues = try sourceURL.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
-        var destinationValues = URLResourceValues()
-        destinationValues.creationDate = sourceValues.creationDate
-        destinationValues.contentModificationDate = sourceValues.contentModificationDate
-        var mutableDestinationURL = destinationURL
-        try mutableDestinationURL.setResourceValues(destinationValues)
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            throw FolderCompareError.invalidFileOperation("复制文件失败：\(file.relativePath)")
+        }
     }
 
     private func snapshot(for folder: URL) throws -> FolderSnapshot {
